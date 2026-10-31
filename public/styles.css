@@ -469,7 +469,7 @@ button.on,
 #multiplayer-hud {
     position: fixed;
     z-index: 20;
-    top: calc(78px + env(safe-area-inset-top, 0px));
+    top: calc(126px + env(safe-area-inset-top, 0px));
     left: 50%;
     display: flex;
     align-items: center;
@@ -485,6 +485,12 @@ button.on,
     white-space: nowrap;
     backdrop-filter: blur(10px);
 }
+
+#flight-hud{right:18px;top:calc(18px + env(safe-area-inset-top,0px));z-index:7;min-width:210px;padding:11px 14px;border:1px solid rgba(150,205,255,.22);border-radius:12px;background:rgba(7,10,18,.78);backdrop-filter:blur(9px);font-size:11px;letter-spacing:.08em;color:#aebdd0}
+#flight-hud>div+div{margin-top:5px}#flight-hud small{font-size:10px;color:#7fb4d6}#altitude-val{margin-left:7px;font-size:24px;font-weight:300;color:#fff;letter-spacing:.02em}#assist-status{color:#b9d9ff}#pilot-status{color:#8ff0c8}
+#upgrade-toggle{position:fixed;z-index:15;right:18px;bottom:18px;padding:8px 12px;background:rgba(8,12,20,.86);backdrop-filter:blur(10px)}
+#upgrade-panel{position:fixed;z-index:30;right:18px;bottom:58px;width:min(365px,calc(100vw - 36px));max-height:min(78vh,650px);overflow:auto;padding:15px;border:1px solid rgba(135,195,255,.28);border-radius:14px;background:linear-gradient(145deg,rgba(14,20,34,.97),rgba(4,8,14,.96));box-shadow:0 20px 70px rgba(0,0,0,.48);pointer-events:auto}
+.tuning-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin-top:12px}.tuning-grid label,.pilot-controls label{display:grid;gap:4px;color:#b9c7d9;font-size:11px}.tuning-grid output{color:#fff;font-size:12px}.tuning-grid input{width:100%;accent-color:#78d6ff}.pilot-controls{display:grid;gap:9px;margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,.12)}.pilot-controls>div{display:flex;flex-wrap:wrap;gap:5px}.pilot-controls button{padding:6px 8px;border-radius:7px}.pilot-controls button.active{background:#dff6ff;color:#071018}.pilot-controls select,.pilot-controls input[type=number]{background:#090e17;border:1px solid rgba(160,200,240,.25);border-radius:5px;color:#fff;padding:5px}.pilot-controls .check{display:block}.pilot-controls #zero-report{color:#8ea2bb;line-height:1.4}
 
 #multiplayer-hud[hidden] {
     display: none;
@@ -508,7 +514,7 @@ button.on,
 
 @media (max-width: 520px) {
     #multiplayer-hud {
-        top: calc(218px + env(safe-area-inset-top, 0px));
+        top: calc(248px + env(safe-area-inset-top, 0px));
         left: auto;
         right: 8px;
         justify-content: center;
@@ -521,7 +527,7 @@ button.on,
 
 @media (max-width: 760px), (pointer: coarse) {
     #multiplayer-hud {
-        top: calc(150px + env(safe-area-inset-top, 0px));
+        top: calc(180px + env(safe-area-inset-top, 0px));
         left: auto;
         right: 8px;
         transform: none;
@@ -1450,6 +1456,7 @@ button.on {
  .pop{font-size:14px}.pop.big,.pop.trick{font-size:17px}.pop.zone{font-size:18px}
  #toast{top:calc(225px + env(safe-area-inset-top,0px))}
  #mode-status{display:none}
+ #flight-hud{right:8px;top:calc(148px + env(safe-area-inset-top,0px));min-width:0;padding:7px 9px;font-size:9px}#altitude-val{font-size:17px}#upgrade-toggle{right:8px;bottom:8px;font-size:11px;padding:7px 9px}#upgrade-panel{right:8px;bottom:48px;width:calc(100vw - 16px)}.tuning-grid{grid-template-columns:1fr}
 }
 @media (max-width:760px){#tel{top:calc(8px + env(safe-area-inset-top,0px)) !important}}
 

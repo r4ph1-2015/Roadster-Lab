@@ -9,7 +9,9 @@ This is an independent fan project inspired by the idea and visual spectacle of 
 The project is now a single open-world night-time test facility instead of five separate scenarios. Drive between zones, run the experiments, and chain stunts for combo multipliers.
 
 - **Hand-authored Tesla Roadster model:** a GLB car (`tesla_roadster.glb`) with working headlamps and taillamps, replacing the earlier procedural body.
-- **WebGPU rendering:** Three.js WebGPU renderer with a custom sky dome (sun, stars, clouds), distant mountains and a neon skyline, image-based lighting that matches the sky, and a post stack of bloom, speed-based chromatic blur, ACES tone mapping, vignette and film grain. Press `B` for a bloom tuning panel.
+- **WebGPU rendering:** Three.js WebGPU renderer with a custom sky dome (sun, stars, clouds), distant mountains and a neon skyline, image-based lighting that matches the sky, and a post stack of bloom, speed-based chromatic blur, ACES tone mapping, vignette and film grain. Press `V` for the developer bloom panel.
+- **Infinite expedition layer:** deterministic terrain chunks stream in every direction outside the authored facility, with no automatic altitude or map-edge respawn.
+- **Advanced tuning and pilots:** live speed, thrust, response, steering, stability and wall-grip controls; Standard, Trick and Roadster ZERO pilots use the real landing scorer.
 - **Rigid-body vehicle physics:** mass and inertia, per-wheel and chassis contact points, suspension, traction and brake-to-drift handling, solid-obstacle collision, and curved profile surfaces for walls steeper than the height-field allows.
 - **Rocket-assisted stunts:** rear, bottom and side thrusters with a fuel reserve, airborne pitch/roll/yaw control, and AUTO landing assist or MANUAL direct control.
 - **Wall adhesion:** toggle grip with `G` and hold `Shift` to ride walls and the circular tunnel.
@@ -109,10 +111,12 @@ The next version should extract vehicle physics and world collision data into a 
 | `Shift` | Hold wall grip |
 | `G` | Toggle the wall-grip system on or off |
 | `M` | Switch AUTO / MANUAL thruster mode |
+| `B` | Toggle Stability Mode |
+| `P` | Cycle Manual, Standard, Trick and Roadster ZERO autopilot (manual drive input interrupts) |
 | Mouse drag | Orbit the camera; it returns to chase view after 3.5 seconds |
 | `R` | Respawn at the last checkpoint |
 | `T` | Return to the start |
-| `B` | Show/hide the bloom panel |
+| `V` | Show/hide the developer bloom panel |
 | `H` | Hide/show the controls guide |
 | `Esc` | Open/close the menu |
 

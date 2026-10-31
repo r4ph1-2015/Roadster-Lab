@@ -104,7 +104,7 @@ loadScreen.set(.2, 'Building the test facility');
 const scene = new THREE_NS.Scene();
 scene.background = FOG_COL.clone();
 scene.fog = new THREE_NS.Fog(FOG_COL, 60, 1100);
-const camera = new THREE_NS.PerspectiveCamera(62, 1, .25, 3200);
+const camera = new THREE_NS.PerspectiveCamera(62, 1, .25, 200000);
 window.__camRef = camera;
 
 /* ---- sky dome (shader): gradient, sun, stars, clouds ---- */
@@ -312,13 +312,13 @@ function addHeightRegion(x0, x1, z0, z1, f) {
 }
 function getSurfaceHeight(x, z) {
     const a = heightGrid.get(cellKey(Math.floor(x / CELL), Math.floor(z / CELL)));
-    if (!a) return 0;
+    if (!a) return infiniteTerrainHeight(x, z);
     let h = 0;
     for (let i = 0; i < a.length; i++) {
         const r = a[i];
         if (x > r.x0 && x < r.x1 && z > r.z0 && z < r.z1) { const v = r.f(x, z); if (v > h) h = v; }
     }
-    return h;
+    return h || infiniteTerrainHeight(x, z);
 }
 
 /* ---- profile surfaces: curved walls extruded sideways (steeper than the height-field allows) ---- */
@@ -617,6 +617,41 @@ function terrainMesh(o) {
     m.castShadow = m.receiveShadow = true;
     scene.add(m);
     return m;
+}
+
+/* ---- infinite terrain streaming -------------------------------------------------
+   The authored lab remains the authoritative height-field inside its footprint.  Beyond
+   it, a deterministic analytic surface provides collision immediately; visual chunks are
+   cached by coordinate and can be safely unloaded/rebuilt without changing the landscape. */
+const WORLD_CHUNK = 128, WORLD_RADIUS = 2, worldChunks = new Map();
+function infiniteTerrainHeight(x, z) {
+    if (x > -620 && x < 620 && z > -520 && z < 1020) return 0;
+    const a = Math.sin(x * .0107 + z * .0041) * 8;
+    const b = Math.cos(z * .0083 - x * .0032) * 5;
+    const c = Math.sin((x + z) * .023) * 1.8;
+    return Math.max(-10, a + b + c - 2);
+}
+function worldChunkMesh(cx, cz) {
+    const step = 8, x0 = cx * WORLD_CHUNK, z0 = cz * WORLD_CHUNK, n = WORLD_CHUNK / step;
+    // Do not layer a second mesh over the authored facility floor.
+    if (x0 >= -640 && x0 + WORLD_CHUNK <= 640 && z0 >= -520 && z0 + WORLD_CHUNK <= 1020) return null;
+    const pos = new Float32Array((n + 1) * (n + 1) * 3), col = new Float32Array((n + 1) * (n + 1) * 3), uv = new Float32Array((n + 1) * (n + 1) * 2), idx = [];
+    for (let j = 0; j <= n; j++) for (let i = 0; i <= n; i++) {
+        const k = j * (n + 1) + i, x = x0 + i * step, z = z0 + j * step, y = infiniteTerrainHeight(x, z);
+        pos.set([x, y, z], k * 3); uv.set([x / 32, z / 32], k * 2);
+        const shade = .52 + Math.min(.32, Math.max(-.12, y * .018)); col.set([shade * .72, shade * .55, shade * .62], k * 3);
+        if (i < n && j < n) { const q = k + n + 1; idx.push(k, q, q + 1, k, q + 1, k + 1); }
+    }
+    const g = new THREE_NS.BufferGeometry(); g.setAttribute('position', new THREE_NS.BufferAttribute(pos, 3)); g.setAttribute('color', new THREE_NS.BufferAttribute(col, 3)); g.setAttribute('uv', new THREE_NS.BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals();
+    const mesh = new THREE_NS.Mesh(g, terrainMat); mesh.receiveShadow = true; scene.add(mesh); return mesh;
+}
+function updateInfiniteTerrain(p) {
+    const cx = Math.floor(p.x / WORLD_CHUNK), cz = Math.floor(p.z / WORLD_CHUNK), wanted = new Set();
+    for (let z = cz - WORLD_RADIUS; z <= cz + WORLD_RADIUS; z++) for (let x = cx - WORLD_RADIUS; x <= cx + WORLD_RADIUS; x++) {
+        const key = x + ',' + z; wanted.add(key);
+        if (!worldChunks.has(key)) worldChunks.set(key, worldChunkMesh(x, z));
+    }
+    for (const [key, mesh] of worldChunks) if (!wanted.has(key)) { if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); } worldChunks.delete(key); }
 }
 /* a curved wall (profile) extruded between l0..l1; pts are [u, y] with free space on the left of travel */
 function profileSurface(Z, o) {
@@ -1613,6 +1648,54 @@ const vehicleState = {
     rotPitch: 0, rotRoll: 0, rotYaw: 0
 };
 let wallGripEnabled = true; // G toggles wall grip, including automatic engagement on steep surfaces.
+let stabilityMode = false;
+const tuning = { maxSpeed: 500 / 3.6, power: 1, response: 12, steering: 1, stability: 1, grip: 1 };
+const pilot = {
+    mode: 0, maintainAltitude: true, target: 10000000, singleTrick: false,
+    input: { thr: 0, str: 0, yaw: 0, rocket: 0, lift: 0 },
+    plan: 0, planTime: 0, landingScore: 0, trials: new Map(), bestPlan: 0, report: 'Waiting for a scored landing.'
+};
+const PILOT_NAMES = ['MANUAL', 'STANDARD', 'TRICK', 'ROADSTER ZERO'];
+const manualInputActive = () => ['W', 'S', 'A', 'D', 'Q', 'E', 'Space', 'F', 'Z', 'C', 'Shift'].some(k => inputKeys[k]);
+function selectPilot(mode, message = true) {
+    pilot.mode = mode;
+    pilot.input = { thr: 0, str: 0, yaw: 0, rocket: 0, lift: 0 };
+    if (message) showToast('PILOT · ' + PILOT_NAMES[mode]);
+    document.querySelectorAll('[data-pilot]').forEach(b => b.classList.toggle('active', +b.dataset.pilot === mode));
+}
+function updateAutopilot(h) {
+    const a = pilot.input = { thr: 0, str: 0, yaw: 0, rocket: 0, lift: 0 };
+    if (!pilot.mode || manualInputActive()) return;
+    const s = vehicleState, altitude = s.p.y - getSurfaceHeight(s.p.x, s.p.z), air = s.nc < 3;
+    if (!air) { a.thr = .75; return; }
+    const up = createVector(0, 1, 0).applyQuaternion(s.q), localW = s.w.clone().applyQuaternion(s.q.clone().invert());
+    const levelPitch = clamp(-up.z * 3.2 - localW.x * .42), levelRoll = clamp(up.x * 3.2 - localW.z * .42);
+    if (pilot.mode === 1) {
+        a.thr = .45; a.rocket = .25; a.str = -levelRoll;
+        if (pilot.maintainAltitude) a.lift = clamp(.54 + (18 - altitude) * .025 - s.v.y * .035, 0, 1);
+        a.yaw = clamp(-localW.y * .25);
+    } else {
+        const patterns = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [1, 1, .5], [-1, -1, -.5]];
+        const plan = patterns[pilot.plan % patterns.length]; pilot.planTime += h;
+        a.thr = .45; a.rocket = .72; a.lift = altitude < 28 ? .8 : .18;
+        a.thr += plan[0] * .25; a.str = plan[1] * .95; a.yaw = plan[2];
+        if (pilot.mode === 3 && pilot.planTime > 2.4 && !pilot.singleTrick) { pilot.plan = (pilot.plan + 1) % patterns.length; pilot.planTime = 0; }
+        if (pilot.mode === 2 && pilot.planTime > 2.6) { pilot.plan = (pilot.plan + 1) % patterns.length; pilot.planTime = 0; }
+        // Recovery still uses the real landing scorer; ZERO simply avoids wasting a failed run.
+        if (altitude < 7 && s.v.y < -6 && !pilot.singleTrick) { a.str = -levelRoll; a.thr = levelPitch; a.lift = 1; a.rocket = 0; }
+    }
+}
+function recordZeroResult(beforeScore) {
+    if (pilot.mode !== 3) return;
+    const gain = Math.max(0, G.score - beforeScore), key = String(pilot.plan);
+    const old = pilot.trials.get(key) || { total: 0, runs: 0, fails: 0 };
+    old.total += gain; old.runs++; if (!gain) old.fails++; pilot.trials.set(key, old);
+    const best = [...pilot.trials.entries()].sort((a, b) => (b[1].total / b[1].runs) - (a[1].total / a[1].runs))[0];
+    if (best) pilot.bestPlan = +best[0];
+    if (old.fails >= 2) pilot.plan = (pilot.plan + 1) % 6; else if (best) pilot.plan = pilot.bestPlan;
+    pilot.planTime = 0;
+    pilot.report = `Actual run +${fmt(gain)} · plan ${key} avg ${fmt(old.total / old.runs)}${G.score >= pilot.target ? ' · target reached' : ''}`;
+}
 const inputKeys = {}, KM = {
     KeyW: 'W',
     ArrowUp: 'W',
@@ -1743,7 +1826,8 @@ thrusters.push({
     b: 9
 });
 function updatePhysics(h) {
-    const { p, q, v, w } = vehicleState, qi = q.clone().invert(), fw = createVector(0, 0, 1).applyQuaternion(q), Fn = createVector(0, -9.81 * VEHICLE_MASS, 0), Tq = createVector(), spd = v.length(), thr = (inputKeys.W | 0) - (inputKeys.S | 0), str = (inputKeys.A | 0) - (inputKeys.D | 0);
+    updateAutopilot(h);
+    const { p, q, v, w } = vehicleState, qi = q.clone().invert(), fw = createVector(0, 0, 1).applyQuaternion(q), Fn = createVector(0, -9.81 * VEHICLE_MASS, 0), Tq = createVector(), spd = v.length(), thr = (inputKeys.W | 0) - (inputKeys.S | 0) + pilot.input.thr, str = (inputKeys.A | 0) - (inputKeys.D | 0) + pilot.input.str;
     let nc = 0, ny = 1;
     const act = (r, f) => {
         Fn.add(f);
@@ -1773,13 +1857,13 @@ function updatePhysics(h) {
     // Keep this to ground driving; it should not alter wall riding or airborne control.
     const driftRequested = !!inputKeys.S && Math.abs(str) > 0 && spd > 7.5 && vehicleState.nc >= 3 && vehicleState.steep > 0.55;
     vehicleState.drifting = driftRequested;
-    const steerAuthority = driftRequested ? 0.72 : 0.5;
+    const steerAuthority = (driftRequested ? 0.72 : 0.5) * tuning.steering;
     const steerSpeedScale = driftRequested ? 20 : 14;
     vehicleState.steer += (str * steerAuthority / (1 + spd / steerSpeedScale) - vehicleState.steer) * Math.min(1, h * 8);
     const gripRequested = wallGripEnabled && (inputKeys.Shift || (vehicleState.auto && vehicleState.steep < 0.9));
     // Release grip faster than it engages, so the car can cleanly leave a wall ride.
     const gripResponse = gripRequested ? 6 : 12;
-    vehicleState.ad += ((gripRequested ? 1 : 0) - vehicleState.ad) * Math.min(1, h * gripResponse);
+    vehicleState.ad += ((gripRequested ? Math.min(1, tuning.grip) : 0) - vehicleState.ad) * Math.min(1, h * gripResponse);
     WHEEL_CONTACT_OFFSETS.forEach(a => {
         const r = createVector(a[0], 0, a[1]).applyQuaternion(q);
         const P = p.clone().add(r);
@@ -1801,14 +1885,14 @@ function updatePhysics(h) {
         let Fx = -vf * (vehicleState.ad > .3 && !thr ? 8000 : 60);
         // Stronger wheel-driven acceleration so W is useful without the rocket thruster.
         if (thr > 0 && !a[2])
-            Fx += 10000 * Math.max(0, 1 - spd / 85);
+            Fx += 10000 * Math.max(0, 1 - spd / tuning.maxSpeed);
         if (thr < 0)
             Fx -= vf > 2 ? 3500 : (a[2] ? 0 : Math.max(0, 3000 * (1 + vf / 12)));
         // Braking transfers load forward; reduced rear lateral grip lets the rear rotate naturally.
         if (driftRequested && !a[2])
             Fx -= Math.min(1200, Math.abs(vf) * 22);
         const lateralGrip = driftRequested ? (a[2] ? 3600 : 1050) : 7500;
-        act(r, n.clone().multiplyScalar(N - vehicleState.ad * 14000).addScaledVector(f, clamp(Fx, -mx, mx)).addScaledVector(s, -clamp(vl * lateralGrip, -mx, mx)));
+        act(r, n.clone().multiplyScalar(N - vehicleState.ad * 14000 * Math.max(1, tuning.grip)).addScaledVector(f, clamp(Fx, -mx, mx)).addScaledVector(s, -clamp(vl * lateralGrip, -mx, mx)));
     });
     /* ad = suction fans pressing wheels to the surface */
     CHASSIS_CONTACT_OFFSETS.forEach(a => {
@@ -1835,7 +1919,7 @@ function updatePhysics(h) {
     if (air && hasF) {
         if (vehicleState.auto) {
             const ax = up.clone().cross(createVector(0, 1, 0)), ang = Math.acos(clamp(up.y)), eb = (ax.lengthSq() > 1e-8 ? ax.normalize().multiplyScalar(ang) : createVector(0, 0, ang)).applyQuaternion(qi), wl = w.clone().applyQuaternion(qi);
-            const tg = alt / Math.max(-v.y, 1), lev = tg < 1.8 + 0.65 * ang || alt < 5, qy = (inputKeys.Q | 0) - (inputKeys.E | 0);
+            const tg = alt / Math.max(-v.y, 1), lev = tg < 1.8 + 0.65 * ang || alt < 5, qy = (inputKeys.Q | 0) - (inputKeys.E | 0) + pilot.input.yaw;
             vehicleState.lev = lev;
             /* pilot rotates freely until the autopilot must level for landing */
             if (lev) {
@@ -1865,36 +1949,44 @@ function updatePhysics(h) {
         else {
             pt = thr;
             rl = -str;
-            yw = (inputKeys.Q | 0) - (inputKeys.E | 0);
+            yw = (inputKeys.Q | 0) - (inputKeys.E | 0) + pilot.input.yaw;
             ly = (inputKeys.Z | 0) - (inputKeys.C | 0);
         }
     }
     /* F manually fires the bottom thrusters in either mode. */
-    if (hasF && inputKeys.F)
+    if (hasF && (inputKeys.F || pilot.input.lift))
         base = 1;
     thrusters.forEach((t, i) => {
-        t.c = i < 4 ? clamp(base + pt * -t.sz + rl * t.sx, 0, 1) : i < 8 ? clamp(-ly * t.sx - yw * t.sz * t.sx, 0, 1) : (inputKeys.Space && hasF ? 1 : 0);
+        t.c = i < 4 ? clamp(base + pt * -t.sz + rl * t.sx, 0, 1) : i < 8 ? clamp(-ly * t.sx - yw * t.sz * t.sx, 0, 1) : ((inputKeys.Space || pilot.input.rocket) && hasF ? 1 : 0);
     });
     // Give the bottom thrusters extra authority only while AUTO is actively assisting a landing.
     const landingThrusterBoost = vehicleState.auto && air && vehicleState.lev && alt < 80 && v.y < 0 ? 1.3 : 1;
     // Wall grip is an aerodynamic/mechanical assist and does not consume fuel.
     let use = 0;
     thrusters.forEach((t, i) => {
-        t.l += (t.c - t.l) * Math.min(1, h * 12);
+        t.l += (t.c - t.l) * Math.min(1, h * tuning.response);
         if (t.l > .01) {
             const thrustScale = i < 4 ? landingThrusterBoost : 1;
-            act(t.r.clone().applyQuaternion(q), t.d.clone().applyQuaternion(q).multiplyScalar(t.m * t.l * thrustScale));
+            act(t.r.clone().applyQuaternion(q), t.d.clone().applyQuaternion(q).multiplyScalar(t.m * t.l * thrustScale * tuning.power));
             use += t.b * t.l;
         }
     });
     /* F=T*d, torque=r x F */
     vehicleState.tl = thrusters[8].l;
     Tq.addScaledVector(w, -400);
+    if (stabilityMode && air) {
+        const worldUp = createVector(0, 1, 0), error = up.clone().cross(worldUp);
+        // Damps accidental tumbling but deliberately leaves pilot pitch/yaw authority intact.
+        Tq.addScaledVector(error, VEHICLE_INERTIA[0] * 10 * tuning.stability);
+        Tq.addScaledVector(w, -VEHICLE_INERTIA[0] * 1.7 * tuning.stability);
+    }
     vehicleState.fuel = 100; // Infinite fuel: never drain the reserve.
     vehicleState.g.lerp(Fn.clone().sub(createVector(0, -9.81 * VEHICLE_MASS, 0)).divideScalar(VEHICLE_MASS * 9.81).applyQuaternion(qi), 1 - Math.exp(-h / .05));
     vehicleState.steep = nc ? ny : 1;
     /* G-force = specific force in body frame */
     v.addScaledVector(Fn, h / VEHICLE_MASS);
+    // A soft cap avoids unstable impulses at extreme tuning while still permitting 5,000+ km/h.
+    if (v.length() > tuning.maxSpeed) v.multiplyScalar(tuning.maxSpeed / v.length());
     const tb = Tq.applyQuaternion(qi), wb = w.clone().applyQuaternion(qi);
     wb.x += tb.x / VEHICLE_INERTIA[0] * h;
     wb.y += tb.y / VEHICLE_INERTIA[1] * h;
@@ -1912,9 +2004,10 @@ function updatePhysics(h) {
             v.addScaledVector(pq[1], -vn);
     }
     const hc = getSurfaceHeight(p.x, p.z);
+    // Continuous terrain catches extreme-speed tunnelling without treating it as a respawn.
+    if (p.y < hc - 3) { p.y = hc + .6; if (v.y < 0) v.y = 0; }
     resolveSolids(p, v, q);
-    if (p.y < -30 || Math.abs(p.x) > 560 || p.z < -420 || p.z > 920)
-        respawn();
+    // No world or altitude respawn bounds: streamed terrain and manual recovery handle long flights.
     if (nc === 0) {
         if (vehicleState.air === 0) {
             vehicleState.t0.copy(p);
@@ -1940,7 +2033,9 @@ function handleLanding() {
     vehicleState.best = Math.max(vehicleState.best, d);
     vehicleState.shake = Math.min(1, imp / 18);
     playLandingImpact(imp);
+    const scoreBeforeLanding = G.score;
     scoreLanding(d, vehicleState.air, vehicleState.maxH, imp);
+    recordZeroResult(scoreBeforeLanding);
     for (let i = 0; i < 40; i++)
         emitParticle(vehicleState.p.clone().add(createVector(randomOffset(3), -.4, randomOffset(4))), createVector(randomOffset(10), Math.random() * 3, randomOffset(10)), 1.2, 1);
 }
@@ -2439,8 +2534,15 @@ addEventListener('keydown', e => {
         respawn(0);
     if (e.code === 'KeyM')
         setThrusterMode(1);
+    if (e.code === 'KeyB' && !e.repeat) {
+        stabilityMode = !stabilityMode;
+        showToast(stabilityMode ? 'STABILITY MODE · ON' : 'STABILITY MODE · OFF');
+    }
+    if (e.code === 'KeyP' && !e.repeat)
+        selectPilot((pilot.mode + 1) % 4);
     if (e.code === 'KeyG' && !e.repeat)
         toggleWallGrip();
+    if (pilot.mode && KM[e.code]) selectPilot(0, false);
     if (e.code === 'KeyH')
         setDetailsOpen(detailsPanel.hidden);
 });
@@ -2463,6 +2565,33 @@ function setDetailsOpen(open) {
 }
 detailsToggle.addEventListener('click', () => setDetailsOpen(detailsPanel.hidden));
 getElement('details-close').addEventListener('click', () => setDetailsOpen(false));
+
+/* ---------- live upgrade controls ---------- */
+const upgradePanel = getElement('upgrade-panel'), upgradeToggle = getElement('upgrade-toggle');
+function setUpgradeOpen(open) { upgradePanel.hidden = !open; upgradeToggle.setAttribute('aria-expanded', String(open)); }
+upgradeToggle.addEventListener('click', () => setUpgradeOpen(upgradePanel.hidden));
+getElement('upgrade-close').addEventListener('click', () => setUpgradeOpen(false));
+[
+    ['speed', 'maxSpeed', v => (+v / 3.6), v => Math.round(v * 3.6) + ' km/h'],
+    ['power', 'power', Number, v => v.toFixed(1) + '×'],
+    ['response', 'response', Number, v => v + '×'],
+    ['steering', 'steering', Number, v => v.toFixed(2) + '×'],
+    ['stability', 'stability', Number, v => v.toFixed(2) + '×'],
+    ['grip', 'grip', Number, v => v.toFixed(1) + '×']
+].forEach(([name, property, parse, format]) => {
+    const control = getElement('tune-' + name), out = getElement('tune-' + name + '-out');
+    const update = () => { tuning[property] = parse(control.value); out.textContent = format(tuning[property]); };
+    control.addEventListener('input', update); update();
+});
+document.querySelectorAll('[data-pilot]').forEach(b => b.addEventListener('click', () => selectPilot(+b.dataset.pilot)));
+getElement('pilot-altitude').addEventListener('change', e => { pilot.maintainAltitude = e.target.checked; });
+getElement('zero-single').addEventListener('change', e => { pilot.singleTrick = e.target.checked; });
+getElement('zero-target').addEventListener('change', e => {
+    const custom = e.target.value === 'custom'; getElement('zero-custom').hidden = !custom;
+    if (!custom) pilot.target = +e.target.value;
+});
+getElement('zero-custom').addEventListener('input', e => { if (+e.target.value > 0) pilot.target = +e.target.value; });
+getElement('zero-custom').hidden = true;
 
 
 
@@ -2895,7 +3024,7 @@ try {
     composer.disableBloom = () => { composer.outputNode = makeFx(null); composer.needsUpdate = true; };
 } catch (err) { console.error(err); composer = null; renderer.toneMapping = THREE_NS.ACESFilmicToneMapping; }
 
-/* ---- bloom controls: small floating panel, press B to toggle ---- */
+/* ---- bloom controls: developer panel, press V to toggle (B is Stability Mode) ---- */
 if (bloomPass) {
     const panel = document.createElement('div');
     panel.style.cssText = 'position:fixed;left:10px;bottom:10px;z-index:9999;background:rgba(8,8,10,.82);border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:10px 12px;font:12px/1.4 system-ui,sans-serif;color:#eee;display:none;min-width:190px;backdrop-filter:blur(6px)';
@@ -2908,13 +3037,13 @@ if (bloomPass) {
         v.textContent = (+s.value).toFixed(2);
         r.append(l, s, v); panel.appendChild(r);
     };
-    const title = document.createElement('div'); title.textContent = 'BLOOM (B to hide)'; title.style.cssText = 'opacity:.6;margin-bottom:4px;letter-spacing:.04em';
+    const title = document.createElement('div'); title.textContent = 'BLOOM (V to hide)'; title.style.cssText = 'opacity:.6;margin-bottom:4px;letter-spacing:.04em';
     panel.appendChild(title);
     row('Strength', bloomPass.strength, 0, 1.5, .01);
     row('Radius', bloomPass.radius, 0, 1, .01);
     row('Threshold', bloomPass.threshold, 0, 1.5, .01);
     document.body.appendChild(panel);
-    addEventListener('keydown', e => { if (e.code === 'KeyB' && !e.repeat) panel.style.display = panel.style.display === 'none' ? 'block' : 'none'; });
+    addEventListener('keydown', e => { if (e.code === 'KeyV' && !e.repeat) panel.style.display = panel.style.display === 'none' ? 'block' : 'none'; });
 }
 function resizeRenderer() {
     const w = innerWidth, h = innerHeight;
@@ -2930,6 +3059,7 @@ function renderFrame(dt) {
     const jumped = prevP.distanceToSquared(vehicleState.p) > 36;
     const p = jumped ? vehicleState.p.clone() : prevP.clone().lerp(vehicleState.p, al);
     const q = jumped ? vehicleState.q.clone() : prevQ.clone().slerp(vehicleState.q, al);
+    updateInfiniteTerrain(vehicleState.p);
     const fw = createVector(0, 0, 1).applyQuaternion(q);
     updateSound(spd);
     rig.position.copy(p);
@@ -3140,6 +3270,11 @@ function renderFrame(dt) {
     getElement('fuel').style.width = '100%';
     getElement('fuel').style.background = vehicleState.fuel < 20 ? '#ff3b30' : '#e8f1ff';
     getElement('fuel-percent').textContent = '∞';
+    const currentAltitude = Math.max(0, p.y - getSurfaceHeight(p.x, p.z) - .5);
+    getElement('altitude-val').textContent = Math.round(currentAltitude).toLocaleString() + ' m';
+    getElement('assist-status').textContent = `STABILITY ${stabilityMode ? 'ON' : 'OFF'} · GRIP ${wallGripEnabled ? 'ON' : 'OFF'}`;
+    getElement('pilot-status').textContent = 'PILOT: ' + PILOT_NAMES[pilot.mode];
+    getElement('zero-report').textContent = pilot.mode === 3 ? pilot.report : 'ZERO records actual landing-score results; it does not award score itself.';
     const gm = vehicleState.g.length();
     vehicleState.gp = Math.max(gm, vehicleState.gp * Math.exp(-dt / 2.5));
     const modeLabel = vehicleState.auto ? 'AUTO' : 'MANUAL';
@@ -3152,7 +3287,7 @@ function renderFrame(dt) {
         gripButton.textContent = wallGripEnabled ? 'GRIP ON' : 'GRIP OFF';
         gripButton.setAttribute('aria-pressed', String(wallGripEnabled));
     }
-    const telemetryMarkup = `<div><b>Mode:</b> ${detailedModeLabel}</div><div><b>Wall grip:</b> ${(vehicleState.ad * 100) | 0}% · ${wallGripEnabled ? 'enabled' : 'released'}</div><div><b>Drift:</b> ${vehicleState.drifting ? 'brake + steer' : 'off'}</div><div><b>G-force:</b> <span style="color:${gm > 4 ? '#ff3b30' : 'inherit'}">${gm.toFixed(1)}</span> (up ${vehicleState.g.y.toFixed(1)} · side ${vehicleState.g.x.toFixed(1)}) · peak ${vehicleState.gp.toFixed(1)}</div><div><b>Altitude:</b> ${Math.max(0, p.y - getSurfaceHeight(p.x, p.z) - .5).toFixed(0)} m · <b>Air time:</b> ${vehicleState.air.toFixed(1)} s</div><div><b>Last jump:</b> ${vehicleState.jump | 0} m · <b>Best:</b> ${vehicleState.best | 0} m</div>`;
+    const telemetryMarkup = `<div><b>Mode:</b> ${detailedModeLabel}</div><div><b>Pilot:</b> ${PILOT_NAMES[pilot.mode]} · Stability ${stabilityMode ? 'on' : 'off'}</div><div><b>Wall grip:</b> ${(vehicleState.ad * 100) | 0}% · ${wallGripEnabled ? 'enabled' : 'released'}</div><div><b>Drift:</b> ${vehicleState.drifting ? 'brake + steer' : 'off'}</div><div><b>G-force:</b> <span style="color:${gm > 4 ? '#ff3b30' : 'inherit'}">${gm.toFixed(1)}</span> (up ${vehicleState.g.y.toFixed(1)} · side ${vehicleState.g.x.toFixed(1)}) · peak ${vehicleState.gp.toFixed(1)}</div><div><b>Altitude:</b> ${currentAltitude.toFixed(0)} m · <b>Air time:</b> ${vehicleState.air.toFixed(1)} s</div><div><b>Last jump:</b> ${vehicleState.jump | 0} m · <b>Best:</b> ${vehicleState.best | 0} m</div>`;
     getElement('details-stats').innerHTML = telemetryMarkup;
     getElement('desktop-telemetry-content').innerHTML = telemetryMarkup;
 }
