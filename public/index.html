@@ -83,6 +83,7 @@
    <div><small>ALTITUDE</small> <b id="altitude-val">0 m</b></div>
    <div id="assist-status">STABILITY OFF · GRIP ON</div>
    <div id="pilot-status">PILOT: MANUAL</div>
+   <div id="camera-status">CAMERA · 100% · ADAPTIVE</div>
   </div>
   <button aria-controls="upgrade-panel" aria-expanded="false" id="upgrade-toggle" type="button">Tuning &amp; Autopilot</button>
   <aside aria-label="Advanced vehicle tuning and autopilot" hidden id="upgrade-panel">
@@ -100,6 +101,8 @@
     <label class="check"><input id="pilot-altitude" type="checkbox" checked> Maintain altitude</label>
     <label>ZERO target <select id="zero-target"><option value="10000000">10M</option><option value="100000000">100M</option><option value="1000000000">1B</option><option value="10000000000">10B</option><option value="custom">Custom</option></select><input id="zero-custom" aria-label="Custom ZERO score target" min="1" placeholder="score" type="number"></label>
     <label class="check"><input id="zero-single" type="checkbox"> Single-Trick Score Mode</label>
+    <label class="check"><input id="camera-adaptive" type="checkbox" checked> Adaptive camera zoom</label>
+    <small>Mouse wheel: zoom in/out. Adaptive framing temporarily widens the view during high-speed driving, boosts, and tricks.</small>
     <small id="zero-report">ZERO records actual landing-score results; it does not award score itself.</small>
    </div>
   </aside>

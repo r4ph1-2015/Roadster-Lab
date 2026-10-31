@@ -113,6 +113,7 @@ The next version should extract vehicle physics and world collision data into a 
 | `M` | Switch AUTO / MANUAL thruster mode |
 | `B` | Toggle Stability Mode |
 | `P` | Cycle Manual, Standard, Trick and Roadster ZERO autopilot (manual drive input interrupts) |
+| Mouse wheel | Smooth camera zoom in/out; the optional adaptive camera widens temporarily for speed, boosts and tricks |
 | Mouse drag | Orbit the camera; it returns to chase view after 3.5 seconds |
 | `R` | Respawn at the last checkpoint |
 | `T` | Return to the start |

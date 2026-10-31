@@ -2592,6 +2592,7 @@ getElement('zero-target').addEventListener('change', e => {
 });
 getElement('zero-custom').addEventListener('input', e => { if (+e.target.value > 0) pilot.target = +e.target.value; });
 getElement('zero-custom').hidden = true;
+getElement('camera-adaptive').addEventListener('change', e => { cameraZoom.adaptiveEnabled = e.target.checked; });
 
 
 
@@ -2934,6 +2935,9 @@ const mobileView = matchMedia('(max-width: 760px), (pointer: coarse)');
 let camOff = null, lookOff = null, camAnchorY = null, camFov = 62, camRoll = 0, lastCamP = null, shakeT = 0, speedFx = 0;
 const camUp = createVector(0, 1, 0);
 let lastAlong = 0, accelS = 0, brakeAmt = 0;
+/* Wheel input changes only the player's preferred framing. Adaptive framing is a temporary
+   multiplicative safety margin, so it never overwrites that preference. */
+const cameraZoom = { preferred: 1, adaptive: 0, adaptiveEnabled: true, min: .58, max: 2.35 };
 /* Mouse-look: orbit while dragging, hold the view briefly after release, then ease back. */
 let mouseLookActive = false;
 let mouseLookPointerId = null;
@@ -2975,6 +2979,12 @@ renderer.domElement.addEventListener('pointermove', e => {
     mouseLookYaw -= dx * 0.006;
     mouseLookPitch = clamp(mouseLookPitch + dy * 0.005, -0.95, 0.9);
 });
+renderer.domElement.addEventListener('wheel', e => {
+    if (!gameRunning) return;
+    // Negative delta is scroll-up: move closer. Clamp protects the near clip and extreme flight framing.
+    cameraZoom.preferred = clamp(cameraZoom.preferred + Math.sign(e.deltaY) * .10, cameraZoom.min, cameraZoom.max);
+    e.preventDefault();
+}, { passive: false });
 function stopMouseLook(e) {
     if (!mouseLookActive)
         return;
@@ -3176,7 +3186,10 @@ function renderFrame(dt) {
     }
     /* ---- cinematic chase camera: smoothing happens in car-relative space, so there is no speed-dependent lag ---- */
     if (!window.__freezeCam) {
-    if (lastCamP && lastCamP.distanceToSquared(p) > 36) { camOff = lookOff = camAnchorY = cameraLookTarget = null; cameraHeading = Math.atan2(fw.x, fw.z); camUp.set(0, 1, 0); }
+    // Treat only true teleports as discontinuities. At 5,000+ km/h a normal frame can cover
+    // many metres, and resetting the camera there would create visible tracking jitter.
+    const teleportDistance = Math.max(6, spd * Math.max(dt, 1 / 120) * 4);
+    if (lastCamP && lastCamP.distanceToSquared(p) > teleportDistance * teleportDistance) { camOff = lookOff = camAnchorY = cameraLookTarget = null; cameraHeading = Math.atan2(fw.x, fw.z); camUp.set(0, 1, 0); }
     lastCamP = p.clone();
     camAnchorY = camAnchorY === null ? p.y : camAnchorY + (p.y - camAnchorY) * (1 - Math.exp(-10 * dt));
     const fh = Math.atan2(fw.x, fw.z), vh = Math.atan2(v.x, v.z), fl = Math.hypot(fw.x, fw.z);
@@ -3197,9 +3210,21 @@ function renderFrame(dt) {
     lastAlong = alongV;
     brakeAmt += ((accelS < -2.5 ? 1 : 0) - brakeAmt) * (1 - Math.exp(-14 * dt));
     updateCarLights(brakeAmt, !!inputKeys.S && alongV < -.8);
+    /* Intelligent framing: use inexpensive state already calculated by the physics/camera
+       systems. A damped safety margin reacts quickly to loss-of-frame risks and returns slowly
+       once the car is stable, leaving wheel-selected zoom as the permanent preference. */
+    const speedFrame = clamp((spd - 16) / 140, 0, 1);
+    const boostFrame = Math.max(vehicleState.tl, G.boostFx) * .42;
+    const airFrame = clamp((vehicleState.air - .25) / 2.5, 0, 1) * .3;
+    const spinFrame = clamp(vehicleState.w.length() / 9, 0, 1) * (vehicleState.air > .15 ? .34 : .08);
+    const accelFrame = clamp((Math.abs(accelS) - 8) / 30, 0, 1) * .2;
+    const adaptiveTarget = cameraZoom.adaptiveEnabled ? clamp(speedFrame * .52 + boostFrame + airFrame + spinFrame + accelFrame, 0, .95) : 0;
+    const adaptiveRate = adaptiveTarget > cameraZoom.adaptive ? 3.8 : 1.45;
+    cameraZoom.adaptive += (adaptiveTarget - cameraZoom.adaptive) * (1 - Math.exp(-adaptiveRate * dt));
+    const framing = cameraZoom.preferred * (1 + cameraZoom.adaptive);
     const phoneCam = mobileView.matches;   /* narrow portrait screens: pull the chase camera back so the car doesn't fill the frame */
-    const dist = (5.7 + sp * 1.5 + vehicleState.tl * .9 + clamp(accelS * .035, -.6, 1)) * (phoneCam ? 1.35 : 1);
-    const hgt = Math.max(1.05, 1.9 + sp * .3 + clamp(-v.y * .025, -.6, 1.2)) * (phoneCam ? 1.15 : 1);
+    const dist = (5.7 + sp * 1.5 + vehicleState.tl * .9 + clamp(accelS * .035, -.6, 1)) * framing * (phoneCam ? 1.35 : 1);
+    const hgt = Math.max(1.05, 1.9 + sp * .3 + clamp(-v.y * .025, -.6, 1.2)) * (1 + cameraZoom.adaptive * .16) * (phoneCam ? 1.15 : 1);
     const wantOff = dir.clone().multiplyScalar(-dist).addScaledVector(camUp, hgt);
     const wantLook = dir.clone().multiplyScalar(3.4 + sp * 2.2).addScaledVector(camUp, .55 + clamp(v.y * .04, -1.2, 2.2));
     if (!camOff) { camOff = wantOff.clone(); lookOff = wantLook.clone(); }
@@ -3213,7 +3238,10 @@ function renderFrame(dt) {
     const want = base.clone().add(camOff);
     want.y = Math.max(want.y, getSurfaceHeight(want.x, want.z) + 1, .7);
     keepInTunnel(want, .6);
-    const chaseTarget = base.clone().add(lookOff);
+    // A small velocity lead keeps the Roadster on screen through acceleration, turns and flight
+    // without moving the camera independently of the vehicle's physics position.
+    const leadTime = .045 + Math.min(.17, spd * .00011 + cameraZoom.adaptive * .05);
+    const chaseTarget = base.clone().add(lookOff).addScaledVector(v, leadTime);
     const mouseTarget = p.clone().addScaledVector(camUp, 1);
     if (!mouseLookActive && mouseLookHold) {
         mouseReturnDelay -= dt;
@@ -3249,7 +3277,7 @@ function renderFrame(dt) {
     else camera.position.lerp(cameraDestination, 1 - Math.exp(-10 * dt));
     vehicleState.shake *= Math.exp(-5 * dt);
     shakeT += dt * 24;
-    const shk = vehicleState.shake * .35 + sp * .006;
+    const shk = Math.min(.16, vehicleState.shake * .22 + sp * .003);
     camera.position.add(createVector(Math.sin(shakeT * 1.7) * shk, Math.sin(shakeT * 2.3 + 1) * shk, Math.sin(shakeT * 1.1 + 2) * shk));
     camera.up.copy(camUp);
     camera.lookAt(cameraLookTarget);
@@ -3274,6 +3302,9 @@ function renderFrame(dt) {
     getElement('altitude-val').textContent = Math.round(currentAltitude).toLocaleString() + ' m';
     getElement('assist-status').textContent = `STABILITY ${stabilityMode ? 'ON' : 'OFF'} · GRIP ${wallGripEnabled ? 'ON' : 'OFF'}`;
     getElement('pilot-status').textContent = 'PILOT: ' + PILOT_NAMES[pilot.mode];
+    const cameraPercent = Math.round(cameraZoom.preferred * 100);
+    const adaptiveSuffix = cameraZoom.adaptive > .03 ? ` · +${Math.round(cameraZoom.adaptive * 100)}% TRACK` : '';
+    getElement('camera-status').textContent = `CAMERA · ${cameraPercent}% · ${cameraZoom.adaptiveEnabled ? 'ADAPTIVE' : 'FIXED'}${adaptiveSuffix}`;
     getElement('zero-report').textContent = pilot.mode === 3 ? pilot.report : 'ZERO records actual landing-score results; it does not award score itself.';
     const gm = vehicleState.g.length();
     vehicleState.gp = Math.max(gm, vehicleState.gp * Math.exp(-dt / 2.5));
