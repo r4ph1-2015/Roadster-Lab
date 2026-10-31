@@ -1,0 +1,16 @@
+[project]
+name = "roadster-thrust-lab-cloudflare"
+version = "0.1.0"
+description = "Roadster: Thrust Lab multiplayer Cloudflare Python Worker"
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "Flask>=3.0,<4.0",
+    "Flask-SocketIO>=5.3,<6.0",
+    "python-socketio[client]>=5.11,<6.0",
+    "simple-websocket>=1.0,<2.0",
+    "workers-py",
+    "workers-runtime-sdk",
+]
