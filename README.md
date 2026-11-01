@@ -11,7 +11,8 @@ The project is now a single open-world night-time test facility instead of five 
 - **Hand-authored Tesla Roadster model:** a GLB car (`tesla_roadster.glb`) with working headlamps and taillamps, replacing the earlier procedural body.
 - **WebGPU rendering:** Three.js WebGPU renderer with a custom sky dome (sun, stars, clouds), distant mountains and a neon skyline, image-based lighting that matches the sky, and a post stack of bloom, speed-based chromatic blur, ACES tone mapping, vignette and film grain. Press `V` for the developer bloom panel.
 - **Infinite expedition layer:** deterministic terrain chunks stream in every direction outside the authored facility, with no automatic altitude or map-edge respawn.
-- **Advanced tuning and pilots:** live speed, thrust, response, steering, stability and wall-grip controls; Standard, Trick and Roadster ZERO pilots use the real landing scorer.
+- **Advanced tuning and pilots:** live speed, thrust, response, steering, stability and wall-grip controls; Standard and Trick pilots plus Roadster ZERO use the real landing scorer.
+- **Roadster ZERO learner:** persistent browser-side training records compact real player/ZERO maneuver traces, active vehicle settings, score gain, trick rotation and landing quality. ZERO uses scored strategy ranking with exploration, configurable targets/buffers, and genuine landing feedback—never fabricated points.
 - **Rigid-body vehicle physics:** mass and inertia, per-wheel and chassis contact points, suspension, traction and brake-to-drift handling, solid-obstacle collision, and curved profile surfaces for walls steeper than the height-field allows.
 - **Rocket-assisted stunts:** rear, bottom and side thrusters with a fuel reserve, airborne pitch/roll/yaw control, and AUTO landing assist or MANUAL direct control.
 - **Wall adhesion:** toggle grip with `G` and hold `Shift` to ride walls and the circular tunnel.
@@ -120,6 +121,10 @@ The next version should extract vehicle physics and world collision data into a 
 | `V` | Show/hide the developer bloom panel |
 | `H` | Hide/show the controls guide |
 | `Esc` | Open/close the menu |
+
+### Logitech G923
+
+Connect the G923 before opening the game, then press **Drive**. The wheel steers and the accelerator and brake pedals provide analog throttle and braking (including brake-to-drift). The face buttons control rear rocket, lift, and left/right side thrusters; the shoulder buttons yaw. **Menu** switches AUTO / MANUAL, **View** respawns, and the centre / PS button toggles wall grip. Keyboard and wheel input can be used together.
 
 ### Mobile
 

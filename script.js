@@ -1653,21 +1653,104 @@ const tuning = { maxSpeed: 500 / 3.6, power: 1, response: 12, steering: 1, stabi
 const pilot = {
     mode: 0, maintainAltitude: true, target: 10000000, singleTrick: false,
     input: { thr: 0, str: 0, yaw: 0, rocket: 0, lift: 0 },
-    plan: 0, planTime: 0, landingScore: 0, trials: new Map(), bestPlan: 0, report: 'Waiting for a scored landing.'
+    plan: 0, planTime: 0, landingScore: 0, trials: new Map(), bestPlan: 0, report: 'Learning from real scored maneuvers.', landingBuffer: 0,
+    zeroMode: 'manual', phase: 'observing', sampleT: 0, attemptStartScore: 0, predictedScore: 0, landingStatus: 'Waiting', recommendation: ''
 };
 const PILOT_NAMES = ['MANUAL', 'STANDARD', 'TRICK', 'ROADSTER ZERO'];
-const manualInputActive = () => ['W', 'S', 'A', 'D', 'Q', 'E', 'Space', 'F', 'Z', 'C', 'Shift'].some(k => inputKeys[k]);
+const ZERO_STORAGE_KEY = 'rtl_zero_training_v2';
+const ZERO_STRATEGIES = [
+    { name: 'Pitch chain', controls: [1, 0, 0], power: 1.7, speed: 1050, stability: .7 },
+    { name: 'Reverse pitch', controls: [-1, 0, 0], power: 1.8, speed: 1100, stability: .75 },
+    { name: 'Roll chain', controls: [0, 1, 0], power: 1.55, speed: 950, stability: .85 },
+    { name: 'Counter roll', controls: [0, -1, 0], power: 1.55, speed: 950, stability: .85 },
+    { name: 'Corkscrew', controls: [1, 1, .5], power: 2.1, speed: 1300, stability: .65 },
+    { name: 'Recovery spiral', controls: [-1, -1, -.5], power: 1.9, speed: 1150, stability: .9 }
+];
+function loadZeroTraining() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(ZERO_STORAGE_KEY));
+        if (saved && saved.version === 2 && saved.strategies) return saved;
+    } catch { }
+    return { version: 2, observations: 0, attempts: 0, successfulLandings: 0, bestGain: 0, totalGain: 0, lastScore: 0, strategies: {}, recent: [] };
+}
+const zeroTraining = loadZeroTraining();
+let zeroRunSamples = [], zeroRunActive = false;
+function zeroStrategy(key) {
+    return zeroTraining.strategies[key] || (zeroTraining.strategies[key] = { runs: 0, successes: 0, totalGain: 0, bestGain: 0, humanRuns: 0, settings: null, samples: 0 });
+}
+function saveZeroTraining() {
+    try { localStorage.setItem(ZERO_STORAGE_KEY, JSON.stringify(zeroTraining)); } catch { }
+}
+function zeroSnapshot(source) {
+    const s = vehicleState, altitude = Math.max(0, s.p.y - getSurfaceHeight(s.p.x, s.p.z) - .5);
+    return { source, speed: Math.round(s.v.length() * 3.6), acceleration: Math.round(s.g.length() * 10) / 10, altitude: Math.round(altitude), verticalSpeed: Math.round(s.v.y * 10) / 10, angularSpeed: Math.round(s.w.length() * 100) / 100, rotations: [s.rotPitch, s.rotRoll, s.rotYaw].map(v => Math.round(v * 100) / 100), thrust: Math.round(vehicleState.tl * 100) / 100, score: G.score, multiplier: G.mult, tuning: { power: tuning.power, maxSpeed: Math.round(tuning.maxSpeed * 3.6), steering: tuning.steering, stability: tuning.stability, grip: tuning.grip }, stability: stabilityMode, grip: wallGripEnabled };
+}
+function observeZero(h) {
+    pilot.sampleT += h;
+    if (pilot.sampleT < .2) return; // 5 Hz; learning remains separate from 120 Hz physics.
+    pilot.sampleT = 0;
+    const source = pilot.mode === 3 && pilot.zeroMode === 'autonomous' ? 'zero' : 'player';
+    const snap = zeroSnapshot(source);
+    snap.action = source === 'zero' ? [pilot.input.thr, pilot.input.str, pilot.input.yaw, pilot.input.rocket, pilot.input.lift].map(v => Math.round(v * 100) / 100) : [driveThrottle(), driveSteer(), driveYaw(), Math.max(inputKeys.Space | 0, wheelInput.rocket), Math.max(inputKeys.F | 0, wheelInput.lift)].map(v => Math.round(v * 100) / 100);
+    zeroTraining.observations++;
+    const key = source === 'zero' ? String(pilot.plan) : 'human';
+    const strategy = zeroStrategy(key); strategy.samples++;
+    if (source === 'player') strategy.settings = snap.tuning;
+    if (vehicleState.air > .05) {
+        if (!zeroRunActive) { zeroRunSamples = []; zeroRunActive = true; }
+        if (zeroRunSamples.length < 36) zeroRunSamples.push(snap);
+    }
+    if (zeroTraining.observations % 25 === 0) saveZeroTraining();
+}
+function zeroMean(i) { const x = zeroStrategy(String(i)); return x.runs ? x.totalGain / x.runs : 0; }
+function chooseZeroStrategy() {
+    const total = Math.max(1, zeroTraining.attempts);
+    let best = 0, score = -Infinity;
+    ZERO_STRATEGIES.forEach((_, i) => {
+        const x = zeroStrategy(String(i)), exploration = Math.sqrt(Math.log(total + 2) / (x.runs + 1));
+        const value = zeroMean(i) + exploration * Math.max(250, zeroTraining.bestGain * .12 + 80) - (x.runs > 2 && x.successes / x.runs < .25 ? 180 : 0);
+        if (value > score) { score = value; best = i; }
+    });
+    return best;
+}
+function applyZeroConfiguration(strategy) {
+    // All values are clamped to the public tuning controls' safe ranges.
+    tuning.power = clamp(strategy.power, .5, 100);
+    tuning.maxSpeed = clamp(strategy.speed / 3.6, 500 / 3.6, 6000 / 3.6);
+    tuning.stability = clamp(strategy.stability, 0, 2);
+    tuning.steering = clamp(1 + Math.abs(strategy.controls[1]) * .2, .25, 4);
+    tuning.grip = 1;
+    stabilityMode = true; wallGripEnabled = true;
+    const ui = [['speed', tuning.maxSpeed * 3.6, v => Math.round(v) + ' km/h'], ['power', tuning.power, v => v.toFixed(1) + '×'], ['steering', tuning.steering, v => v.toFixed(2) + '×'], ['stability', tuning.stability, v => v.toFixed(2) + '×'], ['grip', tuning.grip, v => v.toFixed(1) + '×']];
+    ui.forEach(([name, value, label]) => { const control = getElement('tune-' + name), output = getElement('tune-' + name + '-out'); if (control) control.value = String(value); if (output) output.textContent = label(value); });
+}
+function zeroLandingEstimate(altitude) {
+    const s = vehicleState, up = createVector(0, 1, 0).applyQuaternion(s.q);
+    const stable = clamp((up.y + 1) * .5, 0, 1) * clamp(1 - s.w.length() / 14, 0, 1);
+    const descent = s.v.y < 0 ? clamp(1 - Math.abs(s.v.y) / 32, 0, 1) : .7;
+    const chance = clamp(.12 + stable * .62 + descent * .2 + (altitude < 65 ? .1 : 0), .02, .98);
+    const trickPotential = Math.max(0, vehicleState.air * 55 + (Math.abs(vehicleState.rotPitch) + Math.abs(vehicleState.rotRoll) + Math.abs(vehicleState.rotYaw)) * 90) * G.mult;
+    return { chance, expected: trickPotential * chance, altitude };
+}
+const manualInputActive = driveInputActive;
 function selectPilot(mode, message = true) {
     pilot.mode = mode;
     pilot.input = { thr: 0, str: 0, yaw: 0, rocket: 0, lift: 0 };
+    if (mode === 3) { pilot.phase = pilot.zeroMode === 'autonomous' ? 'ready to train autonomously' : 'observing player maneuvers'; pilot.attemptStartScore = G.score; }
     if (message) showToast('PILOT · ' + PILOT_NAMES[mode]);
     document.querySelectorAll('[data-pilot]').forEach(b => b.classList.toggle('active', +b.dataset.pilot === mode));
+    const zeroControls = getElement('zero-mode-controls'); if (zeroControls) zeroControls.hidden = mode !== 3;
 }
 function updateAutopilot(h) {
-    const a = pilot.input = { thr: 0, str: 0, yaw: 0, rocket: 0, lift: 0 };
-    if (!pilot.mode || manualInputActive()) return;
+    const a = pilot.input = { thr: 0, str: 0, yaw: 0, rocket: 0, lift: 0, brake: 0 };
+    observeZero(h);
+    if (manualInputActive()) { if (pilot.mode === 3) { pilot.zeroMode = 'manual'; pilot.phase = 'manual override'; } return; }
+    if (!pilot.mode || (pilot.mode === 3 && pilot.zeroMode !== 'autonomous')) return;
     const s = vehicleState, altitude = s.p.y - getSurfaceHeight(s.p.x, s.p.z), air = s.nc < 3;
-    if (!air) { a.thr = .75; return; }
+    if (!air) {
+        if (pilot.mode === 3) { pilot.plan = chooseZeroStrategy(); pilot.planTime = 0; pilot.attemptStartScore = G.score; pilot.phase = 'launching ' + ZERO_STRATEGIES[pilot.plan].name; applyZeroConfiguration(ZERO_STRATEGIES[pilot.plan]); }
+        a.thr = .75; return;
+    }
     const up = createVector(0, 1, 0).applyQuaternion(s.q), localW = s.w.clone().applyQuaternion(s.q.clone().invert());
     const levelPitch = clamp(-up.z * 3.2 - localW.x * .42), levelRoll = clamp(up.x * 3.2 - localW.z * .42);
     if (pilot.mode === 1) {
@@ -1675,26 +1758,33 @@ function updateAutopilot(h) {
         if (pilot.maintainAltitude) a.lift = clamp(.54 + (18 - altitude) * .025 - s.v.y * .035, 0, 1);
         a.yaw = clamp(-localW.y * .25);
     } else {
-        const patterns = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [1, 1, .5], [-1, -1, -.5]];
+        const patterns = ZERO_STRATEGIES.map(x => x.controls);
+        if (pilot.mode === 3 && pilot.planTime === 0) { pilot.plan = chooseZeroStrategy(); applyZeroConfiguration(ZERO_STRATEGIES[pilot.plan]); pilot.attemptStartScore = G.score; }
         const plan = patterns[pilot.plan % patterns.length]; pilot.planTime += h;
         a.thr = .45; a.rocket = .72; a.lift = altitude < 28 ? .8 : .18;
         a.thr += plan[0] * .25; a.str = plan[1] * .95; a.yaw = plan[2];
-        if (pilot.mode === 3 && pilot.planTime > 2.4 && !pilot.singleTrick) { pilot.plan = (pilot.plan + 1) % patterns.length; pilot.planTime = 0; }
+        if (pilot.mode === 3) {
+            const estimate = zeroLandingEstimate(altitude); pilot.predictedScore = G.score + estimate.expected;
+            const shouldLand = !pilot.singleTrick && (pilot.predictedScore >= pilot.target + pilot.landingBuffer || (estimate.chance < .32 && altitude < 80) || pilot.planTime > 5.4);
+            if (shouldLand) { pilot.phase = 'preparing landing'; pilot.landingStatus = `${Math.round(estimate.chance * 100)}% safe · expected ${fmt(pilot.predictedScore)}`; a.str = -levelRoll; a.thr = levelPitch; a.lift = clamp(.7 + Math.max(0, -s.v.y) * .035, .35, 1); a.rocket = 0; }
+            else pilot.phase = 'executing ' + ZERO_STRATEGIES[pilot.plan].name;
+        }
         if (pilot.mode === 2 && pilot.planTime > 2.6) { pilot.plan = (pilot.plan + 1) % patterns.length; pilot.planTime = 0; }
         // Recovery still uses the real landing scorer; ZERO simply avoids wasting a failed run.
         if (altitude < 7 && s.v.y < -6 && !pilot.singleTrick) { a.str = -levelRoll; a.thr = levelPitch; a.lift = 1; a.rocket = 0; }
     }
 }
-function recordZeroResult(beforeScore) {
-    if (pilot.mode !== 3) return;
-    const gain = Math.max(0, G.score - beforeScore), key = String(pilot.plan);
-    const old = pilot.trials.get(key) || { total: 0, runs: 0, fails: 0 };
-    old.total += gain; old.runs++; if (!gain) old.fails++; pilot.trials.set(key, old);
-    const best = [...pilot.trials.entries()].sort((a, b) => (b[1].total / b[1].runs) - (a[1].total / a[1].runs))[0];
-    if (best) pilot.bestPlan = +best[0];
-    if (old.fails >= 2) pilot.plan = (pilot.plan + 1) % 6; else if (best) pilot.plan = pilot.bestPlan;
-    pilot.planTime = 0;
-    pilot.report = `Actual run +${fmt(gain)} · plan ${key} avg ${fmt(old.total / old.runs)}${G.score >= pilot.target ? ' · target reached' : ''}`;
+function recordZeroResult(beforeScore, landingImpact) {
+    const zeroActive = pilot.mode === 3 && pilot.zeroMode === 'autonomous';
+    const gain = Math.max(0, G.score - beforeScore);
+    const humanPlan = [Math.abs(vehicleState.rotPitch), Math.abs(vehicleState.rotRoll), Math.abs(vehicleState.rotYaw)].indexOf(Math.max(Math.abs(vehicleState.rotPitch), Math.abs(vehicleState.rotRoll), Math.abs(vehicleState.rotYaw)));
+    const key = zeroActive ? String(pilot.plan) : String(humanPlan === 0 ? (vehicleState.rotPitch < 0 ? 1 : 0) : humanPlan === 1 ? (vehicleState.rotRoll < 0 ? 3 : 2) : 4);
+    const clean = createVector(0, 1, 0).applyQuaternion(vehicleState.q).y > .3 && landingImpact < 14;
+    const entry = zeroStrategy(key); entry.runs++; entry.totalGain += gain; entry.bestGain = Math.max(entry.bestGain, gain); if (clean) entry.successes++; if (!zeroActive) entry.humanRuns++; entry.settings = zeroSnapshot(zeroActive ? 'zero' : 'player').tuning;
+    zeroTraining.attempts++; zeroTraining.totalGain += gain; zeroTraining.bestGain = Math.max(zeroTraining.bestGain, gain); if (clean) zeroTraining.successfulLandings++; zeroTraining.lastScore = G.score;
+    zeroTraining.recent.unshift({ source: zeroActive ? 'ZERO' : 'PLAYER', strategy: ZERO_STRATEGIES[+key].name, gain, clean, score: G.score, at: Date.now(), sequence: zeroRunSamples }); zeroTraining.recent.length = Math.min(20, zeroTraining.recent.length); zeroRunActive = false;
+    if (zeroActive) { pilot.planTime = 0; pilot.phase = clean ? 'landing complete' : 'recovering from failed landing'; pilot.landingStatus = clean ? 'safe landing confirmed' : 'crash / unstable landing logged'; pilot.report = `Actual ${clean ? 'safe' : 'failed'} landing +${fmt(gain)} · ${ZERO_STRATEGIES[pilot.plan].name} avg ${fmt(entry.totalGain / entry.runs)}`; }
+    saveZeroTraining();
 }
 const inputKeys = {}, KM = {
     KeyW: 'W',
@@ -1714,6 +1804,82 @@ const inputKeys = {}, KM = {
     ShiftLeft: 'Shift',
     ShiftRight: 'Shift'
 };
+/* ---------- Logitech G923 / racing-wheel input ----------
+   The Gamepad API reports the G923 as a controller in Chrome/Edge. Pedal axis
+   polarity varies with the driver and platform, so each pedal is measured from
+   its resting position instead of assuming that released is always -1 or +1. */
+const wheelInput = {
+    connected: false, index: -1, id: '', pedalRest: [],
+    steer: 0, throttle: 0, brake: 0, yaw: 0, rocket: 0, lift: 0,
+    side: 0, grip: 0, previousButtons: []
+};
+const WHEEL_DEAD_ZONE = .045;
+// The G923 Gamepad axis increases when the wheel turns right; game steering
+// uses the opposite sign (positive means left), so invert the hardware axis.
+const WHEEL_STEERING_SIGN = -1;
+function resetWheelInput() {
+    Object.assign(wheelInput, { connected: false, index: -1, id: '', pedalRest: [], steer: 0, throttle: 0, brake: 0, yaw: 0, rocket: 0, lift: 0, side: 0, grip: 0, previousButtons: [] });
+}
+function wheelAxis(value) {
+    return Math.abs(value) > WHEEL_DEAD_ZONE ? value : 0;
+}
+function wheelPedal(gamepad, axis) {
+    const value = gamepad.axes[axis];
+    if (!Number.isFinite(value)) return 0;
+    const rest = wheelInput.pedalRest[axis];
+    if (!Number.isFinite(rest)) {
+        wheelInput.pedalRest[axis] = value;
+        return 0;
+    }
+    return clamp(Math.abs(value - rest) / Math.max(.25, 1 + Math.abs(rest)), 0, 1);
+}
+function wheelButton(gamepad, index) {
+    const button = gamepad.buttons[index];
+    return button && (button.pressed || button.value > .5) ? 1 : 0;
+}
+function updateWheelInput() {
+    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const gamepad = Array.from(gamepads).find(pad => pad && /g923|logitech.*(g29|g920|g923|driving force)/i.test(pad.id));
+    if (!gamepad) {
+        if (wheelInput.connected) resetWheelInput();
+        return;
+    }
+    const isNewWheel = !wheelInput.connected || wheelInput.index !== gamepad.index || wheelInput.id !== gamepad.id;
+    if (isNewWheel) {
+        resetWheelInput();
+        wheelInput.connected = true;
+        wheelInput.index = gamepad.index;
+        wheelInput.id = gamepad.id;
+        wheelInput.pedalRest = gamepad.axes.slice();
+        if (gameRunning) showToast('G923 CONNECTED · wheel controls active');
+    }
+    // G923 pedals are normally axes 1 (accelerator) and 2 (brake).
+    const accelerator = wheelPedal(gamepad, 1);
+    const brake = wheelPedal(gamepad, 2);
+    wheelInput.steer = WHEEL_STEERING_SIGN * wheelAxis(gamepad.axes[0] || 0);
+    wheelInput.throttle = accelerator;
+    wheelInput.brake = brake;
+    // Face buttons: rear rocket / lift / side thrusters. Shoulder buttons yaw.
+    wheelInput.rocket = wheelButton(gamepad, 0);
+    wheelInput.lift = wheelButton(gamepad, 1);
+    wheelInput.side = wheelButton(gamepad, 2) - wheelButton(gamepad, 3);
+    wheelInput.yaw = wheelButton(gamepad, 4) - wheelButton(gamepad, 5);
+    wheelInput.grip = wheelButton(gamepad, 6);
+    const pressed = gamepad.buttons.map(button => !!(button && (button.pressed || button.value > .5)));
+    const justPressed = index => pressed[index] && !wheelInput.previousButtons[index];
+    // Start/Menu and Back/View work across the PlayStation and Xbox G923 layouts.
+    if (justPressed(9)) setThrusterMode(1);
+    if (justPressed(8)) respawn();
+    if (justPressed(10) || justPressed(16)) toggleWallGrip();
+    wheelInput.previousButtons = pressed;
+}
+function driveThrottle() { return Math.max(inputKeys.W | 0, wheelInput.throttle) - Math.max(inputKeys.S | 0, wheelInput.brake); }
+function driveSteer() { return (inputKeys.A | 0) - (inputKeys.D | 0) + wheelInput.steer; }
+function driveYaw() { return (inputKeys.Q | 0) - (inputKeys.E | 0) + wheelInput.yaw; }
+function driveSide() { return (inputKeys.Z | 0) - (inputKeys.C | 0) + wheelInput.side; }
+function driveInputActive() {
+    return ['W', 'S', 'A', 'D', 'Q', 'E', 'Space', 'F', 'Z', 'C', 'Shift'].some(k => inputKeys[k]) || Math.abs(wheelInput.steer) > WHEEL_DEAD_ZONE || wheelInput.throttle > .02 || wheelInput.brake > .02 || wheelInput.yaw || wheelInput.rocket || wheelInput.lift || wheelInput.side || wheelInput.grip;
+}
 /* ---------- collision: terrain normals, surface contact, solid obstacles ---------- */
 function getTerrainNormal(x, z) {
     const e = .6, n = createVector(getSurfaceHeight(x - e, z) - getSurfaceHeight(x + e, z), 2 * e, getSurfaceHeight(x, z - e) - getSurfaceHeight(x, z + e)).normalize();
@@ -1827,7 +1993,7 @@ thrusters.push({
 });
 function updatePhysics(h) {
     updateAutopilot(h);
-    const { p, q, v, w } = vehicleState, qi = q.clone().invert(), fw = createVector(0, 0, 1).applyQuaternion(q), Fn = createVector(0, -9.81 * VEHICLE_MASS, 0), Tq = createVector(), spd = v.length(), thr = (inputKeys.W | 0) - (inputKeys.S | 0) + pilot.input.thr, str = (inputKeys.A | 0) - (inputKeys.D | 0) + pilot.input.str;
+    const { p, q, v, w } = vehicleState, qi = q.clone().invert(), fw = createVector(0, 0, 1).applyQuaternion(q), Fn = createVector(0, -9.81 * VEHICLE_MASS, 0), Tq = createVector(), spd = v.length(), thr = driveThrottle() + pilot.input.thr - (pilot.input.brake || 0), str = driveSteer() + pilot.input.str;
     let nc = 0, ny = 1;
     const act = (r, f) => {
         Fn.add(f);
@@ -1855,12 +2021,12 @@ function updatePhysics(h) {
     }
     // Natural brake-to-drift: brake while steering at speed to loosen rear grip.
     // Keep this to ground driving; it should not alter wall riding or airborne control.
-    const driftRequested = !!inputKeys.S && Math.abs(str) > 0 && spd > 7.5 && vehicleState.nc >= 3 && vehicleState.steep > 0.55;
+    const driftRequested = !!(inputKeys.S || wheelInput.brake > .02 || pilot.input.brake) && Math.abs(str) > 0 && spd > 7.5 && vehicleState.nc >= 3 && vehicleState.steep > 0.55;
     vehicleState.drifting = driftRequested;
     const steerAuthority = (driftRequested ? 0.72 : 0.5) * tuning.steering;
     const steerSpeedScale = driftRequested ? 20 : 14;
     vehicleState.steer += (str * steerAuthority / (1 + spd / steerSpeedScale) - vehicleState.steer) * Math.min(1, h * 8);
-    const gripRequested = wallGripEnabled && (inputKeys.Shift || (vehicleState.auto && vehicleState.steep < 0.9));
+    const gripRequested = wallGripEnabled && (inputKeys.Shift || wheelInput.grip || (vehicleState.auto && vehicleState.steep < 0.9));
     // Release grip faster than it engages, so the car can cleanly leave a wall ride.
     const gripResponse = gripRequested ? 6 : 12;
     vehicleState.ad += ((gripRequested ? Math.min(1, tuning.grip) : 0) - vehicleState.ad) * Math.min(1, h * gripResponse);
@@ -1919,7 +2085,7 @@ function updatePhysics(h) {
     if (air && hasF) {
         if (vehicleState.auto) {
             const ax = up.clone().cross(createVector(0, 1, 0)), ang = Math.acos(clamp(up.y)), eb = (ax.lengthSq() > 1e-8 ? ax.normalize().multiplyScalar(ang) : createVector(0, 0, ang)).applyQuaternion(qi), wl = w.clone().applyQuaternion(qi);
-            const tg = alt / Math.max(-v.y, 1), lev = tg < 1.8 + 0.65 * ang || alt < 5, qy = (inputKeys.Q | 0) - (inputKeys.E | 0) + pilot.input.yaw;
+            const tg = alt / Math.max(-v.y, 1), lev = tg < 1.8 + 0.65 * ang || alt < 5, qy = driveYaw() + pilot.input.yaw;
             vehicleState.lev = lev;
             /* pilot rotates freely until the autopilot must level for landing */
             if (lev) {
@@ -1949,15 +2115,15 @@ function updatePhysics(h) {
         else {
             pt = thr;
             rl = -str;
-            yw = (inputKeys.Q | 0) - (inputKeys.E | 0) + pilot.input.yaw;
-            ly = (inputKeys.Z | 0) - (inputKeys.C | 0);
+            yw = driveYaw() + pilot.input.yaw;
+            ly = driveSide();
         }
     }
     /* F manually fires the bottom thrusters in either mode. */
-    if (hasF && (inputKeys.F || pilot.input.lift))
+    if (hasF && (inputKeys.F || wheelInput.lift || pilot.input.lift))
         base = 1;
     thrusters.forEach((t, i) => {
-        t.c = i < 4 ? clamp(base + pt * -t.sz + rl * t.sx, 0, 1) : i < 8 ? clamp(-ly * t.sx - yw * t.sz * t.sx, 0, 1) : ((inputKeys.Space || pilot.input.rocket) && hasF ? 1 : 0);
+        t.c = i < 4 ? clamp(base + pt * -t.sz + rl * t.sx, 0, 1) : i < 8 ? clamp(-ly * t.sx - yw * t.sz * t.sx, 0, 1) : ((inputKeys.Space || wheelInput.rocket || pilot.input.rocket) && hasF ? 1 : 0);
     });
     // Give the bottom thrusters extra authority only while AUTO is actively assisting a landing.
     const landingThrusterBoost = vehicleState.auto && air && vehicleState.lev && alt < 80 && v.y < 0 ? 1.3 : 1;
@@ -2035,7 +2201,7 @@ function handleLanding() {
     playLandingImpact(imp);
     const scoreBeforeLanding = G.score;
     scoreLanding(d, vehicleState.air, vehicleState.maxH, imp);
-    recordZeroResult(scoreBeforeLanding);
+    recordZeroResult(scoreBeforeLanding, imp);
     for (let i = 0; i < 40; i++)
         emitParticle(vehicleState.p.clone().add(createVector(randomOffset(3), -.4, randomOffset(4))), createVector(randomOffset(10), Math.random() * 3, randomOffset(10)), 1.2, 1);
 }
@@ -2584,6 +2750,14 @@ getElement('upgrade-close').addEventListener('click', () => setUpgradeOpen(false
     control.addEventListener('input', update); update();
 });
 document.querySelectorAll('[data-pilot]').forEach(b => b.addEventListener('click', () => selectPilot(+b.dataset.pilot)));
+document.querySelectorAll('[data-zero-mode]').forEach(b => b.addEventListener('click', () => {
+    pilot.zeroMode = b.dataset.zeroMode;
+    pilot.phase = pilot.zeroMode === 'autonomous' ? 'ready to train autonomously' : 'observing player maneuvers';
+    pilot.planTime = 0; pilot.attemptStartScore = G.score;
+    document.querySelectorAll('[data-zero-mode]').forEach(x => x.classList.toggle('active', x.dataset.zeroMode === pilot.zeroMode));
+    showToast(pilot.zeroMode === 'autonomous' ? 'ZERO · AUTONOMOUS' : 'ZERO · LEARN / RECOMMEND');
+}));
+document.querySelector('[data-zero-mode="manual"]')?.classList.add('active');
 getElement('pilot-altitude').addEventListener('change', e => { pilot.maintainAltitude = e.target.checked; });
 getElement('zero-single').addEventListener('change', e => { pilot.singleTrick = e.target.checked; });
 getElement('zero-target').addEventListener('change', e => {
@@ -2592,6 +2766,7 @@ getElement('zero-target').addEventListener('change', e => {
 });
 getElement('zero-custom').addEventListener('input', e => { if (+e.target.value > 0) pilot.target = +e.target.value; });
 getElement('zero-custom').hidden = true;
+getElement('zero-landing-buffer').addEventListener('input', e => { pilot.landingBuffer = Math.max(0, +e.target.value || 0); });
 getElement('camera-adaptive').addEventListener('change', e => { cameraZoom.adaptiveEnabled = e.target.checked; });
 
 
@@ -2824,7 +2999,7 @@ function updateSound(speed) {
     const bodyForward = createVector(0, 0, 1).applyQuaternion(vehicleState.q);
     const bodyRight = createVector(1, 0, 0).applyQuaternion(vehicleState.q);
     const lateralSpeed = Math.abs(vehicleState.v.dot(bodyRight));
-    const enginePitch = 46 + Math.min(speed, 95) * 1.42 + (inputKeys.W ? 10 : 0);
+    const enginePitch = 46 + Math.min(speed, 95) * 1.42 + (Math.max(inputKeys.W | 0, wheelInput.throttle) ? 10 : 0);
     soundState.engineA.frequency.setTargetAtTime(enginePitch, now, 0.08);
     soundState.engineB.frequency.setTargetAtTime(enginePitch * 1.48, now, 0.08);
     soundState.engineFilter.frequency.setTargetAtTime(130 + Math.min(speed, 100) * 2.2, now, 0.08);
@@ -3209,7 +3384,7 @@ function renderFrame(dt) {
     accelS += (clamp((alongV - lastAlong) / Math.max(dt, .001), -40, 40) - accelS) * (1 - Math.exp(-5 * dt));
     lastAlong = alongV;
     brakeAmt += ((accelS < -2.5 ? 1 : 0) - brakeAmt) * (1 - Math.exp(-14 * dt));
-    updateCarLights(brakeAmt, !!inputKeys.S && alongV < -.8);
+    updateCarLights(brakeAmt, !!(inputKeys.S || wheelInput.brake > .02) && alongV < -.8);
     /* Intelligent framing: use inexpensive state already calculated by the physics/camera
        systems. A damped safety margin reacts quickly to loss-of-frame risks and returns slowly
        once the car is stable, leaving wheel-selected zoom as the permanent preference. */
@@ -3306,6 +3481,14 @@ function renderFrame(dt) {
     const adaptiveSuffix = cameraZoom.adaptive > .03 ? ` · +${Math.round(cameraZoom.adaptive * 100)}% TRACK` : '';
     getElement('camera-status').textContent = `CAMERA · ${cameraPercent}% · ${cameraZoom.adaptiveEnabled ? 'ADAPTIVE' : 'FIXED'}${adaptiveSuffix}`;
     getElement('zero-report').textContent = pilot.mode === 3 ? pilot.report : 'ZERO records actual landing-score results; it does not award score itself.';
+    const zeroBest = Object.entries(zeroTraining.strategies).filter(([key]) => key !== 'human').sort((a, b) => (b[1].runs ? b[1].totalGain / b[1].runs : 0) - (a[1].runs ? a[1].totalGain / a[1].runs : 0))[0];
+    const landingRate = zeroTraining.attempts ? Math.round(zeroTraining.successfulLandings / zeroTraining.attempts * 100) : 0;
+    getElement('zero-state').textContent = `Mode: ${pilot.zeroMode === 'autonomous' ? 'AUTONOMOUS' : 'LEARN / RECOMMEND'} · ${pilot.phase}`;
+    getElement('zero-prediction').textContent = `Current ${fmt(G.score)} · predicted ${pilot.predictedScore ? fmt(pilot.predictedScore) : '—'} · landing ${pilot.landingStatus}`;
+    getElement('zero-performance').textContent = `Attempts ${zeroTraining.attempts} · avg ${fmt(zeroTraining.attempts ? zeroTraining.totalGain / zeroTraining.attempts : 0)} · best ${fmt(zeroTraining.bestGain)} · safe landings ${landingRate}%`;
+    const selected = ZERO_STRATEGIES[pilot.plan];
+    const learned = zeroBest ? `${ZERO_STRATEGIES[+zeroBest[0]]?.name || 'Archived strategy'} avg ${fmt(zeroBest[1].totalGain / Math.max(1, zeroBest[1].runs))} (${zeroBest[1].successes}/${zeroBest[1].runs} safe)` : 'collecting scored runs';
+    getElement('zero-strategies').textContent = `Strategy: ${selected.name} · thrust ${tuning.power.toFixed(1)}× · max ${Math.round(tuning.maxSpeed * 3.6)} km/h · best learned: ${learned}`;
     const gm = vehicleState.g.length();
     vehicleState.gp = Math.max(gm, vehicleState.gp * Math.exp(-dt / 2.5));
     const modeLabel = vehicleState.auto ? 'AUTO' : 'MANUAL';
@@ -3332,6 +3515,7 @@ renderer.compileAsync(scene, camera).catch(() => {}).then(() => { loadScreen.com
     const dt = Math.min(.1, (t - previousFrameTime) / 1000);
     previousFrameTime = t;
     if (gameRunning) {
+        updateWheelInput();
         simulationAccumulator += dt;
         while (simulationAccumulator >= 1 / 120) {
             prevP.copy(vehicleState.p);

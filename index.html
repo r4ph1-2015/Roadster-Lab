@@ -98,11 +98,14 @@
    </div>
    <div class="pilot-controls">
     <b>Autopilot</b><div><button data-pilot="0" type="button">Manual</button><button data-pilot="1" type="button">Standard</button><button data-pilot="2" type="button">Trick</button><button data-pilot="3" type="button">Roadster ZERO</button></div>
+    <div id="zero-mode-controls" hidden><b>ZERO control</b><div><button data-zero-mode="manual" type="button">Learn / Recommend</button><button data-zero-mode="autonomous" type="button">Autonomous</button></div></div>
     <label class="check"><input id="pilot-altitude" type="checkbox" checked> Maintain altitude</label>
     <label>ZERO target <select id="zero-target"><option value="10000000">10M</option><option value="100000000">100M</option><option value="1000000000">1B</option><option value="10000000000">10B</option><option value="custom">Custom</option></select><input id="zero-custom" aria-label="Custom ZERO score target" min="1" placeholder="score" type="number"></label>
+    <label>Landing score buffer <input id="zero-landing-buffer" aria-label="Additional score to seek before landing" min="0" step="1000" value="0" type="number"></label>
     <label class="check"><input id="zero-single" type="checkbox"> Single-Trick Score Mode</label>
     <label class="check"><input id="camera-adaptive" type="checkbox" checked> Adaptive camera zoom</label>
     <small>Mouse wheel: zoom in/out. Adaptive framing temporarily widens the view during high-speed driving, boosts, and tricks.</small>
+    <div aria-live="polite" id="zero-dashboard"><b>ZERO TRAINING</b><span id="zero-state">Observing player maneuvers</span><span id="zero-prediction">Predicted final score: —</span><span id="zero-performance">No completed training attempts yet.</span><span id="zero-strategies">Strategies: collecting data</span></div>
     <small id="zero-report">ZERO records actual landing-score results; it does not award score itself.</small>
    </div>
   </aside>
@@ -171,7 +174,7 @@
       Controls
      </strong>
      <span>
-      Keyboard shortcuts and vehicle status
+      Keyboard, wheel and touch controls
      </span>
     </div>
     <button aria-label="Close details" id="details-close" type="button">
@@ -250,6 +253,18 @@
        G
       </kbd>
       toggle/release
+     </span>
+     <b>
+      Logitech G923
+     </b>
+     <span>
+      Wheel steering &middot; accelerator / brake pedals drive, reverse and drift
+     </span>
+     <span>
+      Face buttons: rear rocket, lift, left/right side thrusters &middot; shoulder buttons: yaw
+     </span>
+     <span>
+      Menu: AUTO / MANUAL &middot; View: respawn &middot; centre / PS: toggle wall grip
      </span>
      <b>
       Airborne controls
@@ -369,6 +384,14 @@
        Steer (roll in air)
       </td>
      </tr>
+    <tr class="intro-keyboard-row">
+     <td>
+      G923
+     </td>
+     <td>
+      Wheel + pedals; face buttons control thrusters, shoulders yaw
+     </td>
+    </tr>
      <tr class="intro-keyboard-row">
       <td>
        S + A / D
