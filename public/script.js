@@ -2179,7 +2179,6 @@ function updatePhysics(h) {
         if (y >= ground) continue;
         p.set(x, ground, z);
         if (v.y < 0) v.y = 0;
-        v.x *= .55; v.z *= .55;
         break;
     }
     const pq = getProfileContact(p);
