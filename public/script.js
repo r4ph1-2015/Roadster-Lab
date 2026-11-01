@@ -1819,7 +1819,7 @@ const WHEEL_DEAD_ZONE = .045;
 const WHEEL_STEERING_SIGN = -1;
 // Wheels need more travel than keys, so give full-lock input a little extra
 // authority without making the keyboard controls twitchy.
-const WHEEL_STEERING_BOOST = 1.5;
+const WHEEL_STEERING_BOOST = 2.4;
 function resetWheelInput() {
     Object.assign(wheelInput, { connected: false, index: -1, id: '', pedalRest: [], steer: 0, throttle: 0, brake: 0, yaw: 0, rocket: 0, lift: 0, side: 0, grip: 0, previousButtons: [] });
 }
@@ -1877,7 +1877,7 @@ function updateWheelInput() {
     wheelInput.previousButtons = pressed;
 }
 function driveThrottle() { return Math.max(inputKeys.W | 0, wheelInput.throttle) - Math.max(inputKeys.S | 0, wheelInput.brake); }
-function driveSteer() { return (inputKeys.A | 0) - (inputKeys.D | 0) + wheelInput.steer * WHEEL_STEERING_BOOST; }
+function driveSteer() { return (inputKeys.A | 0) - (inputKeys.D | 0) + clamp(wheelInput.steer * WHEEL_STEERING_BOOST); }
 function driveYaw() { return (inputKeys.Q | 0) - (inputKeys.E | 0) + wheelInput.yaw; }
 function driveSide() { return (inputKeys.Z | 0) - (inputKeys.C | 0) + wheelInput.side; }
 function driveInputActive() {
@@ -2165,6 +2165,23 @@ function updatePhysics(h) {
     q.set(q.x + .5 * h * wq.x, q.y + .5 * h * wq.y, q.z + .5 * h * wq.z, q.w + .5 * h * wq.w).normalize();
     const pv0 = p.clone();
     p.addScaledVector(v, h);
+    // Sweep the centre of mass across the height field after integration. At
+    // extreme speeds a single 120 Hz step can otherwise jump over a ramp or
+    // terrain edge before the point-contact solver has a chance to react.
+    const travel = p.distanceTo(pv0);
+    const sweepSteps = Math.min(64, Math.max(1, Math.ceil(travel / .5)));
+    for (let i = 1; i <= sweepSteps; i++) {
+        const fraction = i / sweepSteps;
+        const x = pv0.x + (p.x - pv0.x) * fraction;
+        const y = pv0.y + (p.y - pv0.y) * fraction;
+        const z = pv0.z + (p.z - pv0.z) * fraction;
+        const ground = getSurfaceHeight(x, z) + .55;
+        if (y >= ground) continue;
+        p.set(x, ground, z);
+        if (v.y < 0) v.y = 0;
+        v.x *= .55; v.z *= .55;
+        break;
+    }
     const pq = getProfileContact(p);
     if (pq && pq[0] < .2) {
         p.addScaledVector(pq[1], .2 - pq[0]);
