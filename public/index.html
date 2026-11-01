@@ -344,6 +344,7 @@
       </kbd>
       menu
      </span>
+     <span><kbd>Enter</kbd> room chat &middot; <kbd>Esc</kbd> close chat</span>
     </div>
    </div>
   </aside>
@@ -476,6 +477,15 @@
    <span id="multiplayer-player-count">1 DRIVER</span>
    <button id="copy-room-code" title="Copy room code" type="button">Copy code</button>
    <button id="leave-multiplayer" title="Leave multiplayer room" type="button">Leave</button>
+  </aside>
+  <aside aria-label="Room chat" id="chat-panel" hidden>
+   <div class="chat-heading"><b>ROOM CHAT</b><span>Enter to send · Esc to close</span></div>
+   <div aria-live="polite" aria-relevant="additions" id="chat-messages"></div>
+   <form id="chat-form">
+    <label class="sr-only" for="chat-input">Message room</label>
+    <input autocomplete="off" id="chat-input" maxlength="240" placeholder="Message room…" type="text"/>
+    <button type="submit">Send</button>
+   </form>
   </aside>
 
 

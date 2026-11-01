@@ -3,6 +3,7 @@ import re
 import secrets
 
 MAX_PLAYERS_PER_ROOM = 8
+MAX_CHAT_LENGTH = 240
 ROOM_PATTERN = re.compile(r"^[A-Z0-9]{4,8}$")
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9 _-]{2,20}$")
 PALETTE = ["#e85d4a", "#41a6a0", "#e4b54a", "#658bd6", "#c276aa", "#83ad64", "#d8874a", "#9b83d5"]
@@ -18,6 +19,17 @@ def valid_room(value):
 
 def new_player_id():
     return secrets.token_hex(16)
+
+
+def clean_chat(value):
+    if not isinstance(value, str):
+        return None
+    # Chat is rendered as text, but normalize whitespace here so a message
+    # cannot turn the compact panel into a large block of blank lines.
+    message = " ".join(value.split())
+    if not message or len(message) > MAX_CHAT_LENGTH:
+        return None
+    return message
 
 
 def clean_pose(data):

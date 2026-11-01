@@ -88,7 +88,7 @@ uv run python app.py
 
 Open `http://localhost:8000`. This Flask server is a local-development/legacy reference only; the browser's Cloudflare multiplayer client connects to `/ws`, which is implemented by the Worker/Durable Object. For multiplayer testing, use `uv run pywrangler dev` as described above.
 
-The Cloudflare room supports up to eight players per room. Usernames are room-local and are not accounts. The Durable Object validates pose shape/range and relays poses at up to about 20 updates per second. WebSocket attachments keep player metadata available across Durable Object hibernation. Rooms are coordination state, not persistent player profiles.
+The Cloudflare room supports up to eight players per room. Usernames are room-local and are not accounts. The Durable Object validates pose shape/range, relays poses at up to about 20 updates per second, and broadcasts rate-limited room chat. Press `Enter` while driving to open chat, then `Enter` to send and `Esc` to close it. WebSocket attachments keep player metadata available across Durable Object hibernation. Rooms are coordination state, not persistent player profiles.
 
 ## Multiplayer roadmap
 
@@ -121,6 +121,7 @@ The next version should extract vehicle physics and world collision data into a 
 | `V` | Show/hide the developer bloom panel |
 | `H` | Hide/show the controls guide |
 | `Esc` | Open/close the menu |
+| `Enter` | Open room chat; send message while chat is open |
 
 ### Logitech G923
 

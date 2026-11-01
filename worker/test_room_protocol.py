@@ -1,6 +1,6 @@
 import unittest
 
-from room_protocol import clean_pose, valid_room, valid_username
+from room_protocol import clean_chat, clean_pose, valid_room, valid_username
 
 
 class RoomProtocolTests(unittest.TestCase):
@@ -16,6 +16,11 @@ class RoomProtocolTests(unittest.TestCase):
         self.assertEqual(pose, ([1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0]))
         self.assertIsNone(clean_pose({"position": [float("nan"), 0, 0], "quaternion": [0, 0, 0, 1]}))
         self.assertIsNone(clean_pose({"position": [6000, 0, 0], "quaternion": [0, 0, 0, 1]}))
+
+    def test_chat_is_compact_and_bounded(self):
+        self.assertEqual(clean_chat("  hello\n  room  "), "hello room")
+        self.assertIsNone(clean_chat("   \t"))
+        self.assertIsNone(clean_chat("x" * 241))
 
 
 if __name__ == "__main__":

@@ -1242,6 +1242,45 @@ const pendingRemotePlayers = new Map();
 const knownRemotePlayers = new Set();
 const MULTIPLAYER_SERVER = 'https://roadstersim.pixelated.website';
 const multiplayer = { socket: null, connected: false, room: '', playerId: '', lastPoseSent: 0 };
+const chatPanel = getElement('chat-panel');
+const chatMessages = getElement('chat-messages');
+const chatInput = getElement('chat-input');
+function clearChat() {
+    chatMessages.replaceChildren();
+    chatInput.value = '';
+    chatPanel.hidden = true;
+}
+function setChatOpen(open) {
+    if (!open) {
+        chatPanel.hidden = true;
+        return;
+    }
+    if (!multiplayer.connected) return;
+    chatPanel.hidden = false;
+    requestAnimationFrame(() => chatInput.focus());
+}
+function addChatMessage(message) {
+    if (!message || typeof message.text !== 'string') return;
+    const line = document.createElement('div');
+    const name = document.createElement('b');
+    name.textContent = String(message.username || 'Driver').slice(0, 20) + ':';
+    line.className = 'chat-message';
+    line.append(name, document.createTextNode(' ' + message.text));
+    chatMessages.append(line);
+    while (chatMessages.childElementCount > 40) chatMessages.firstElementChild.remove();
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+function sendChat() {
+    const text = chatInput.value.trim();
+    const socket = multiplayer.socket;
+    if (!text || !multiplayer.connected || !socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: 'chat', text }));
+    chatInput.value = '';
+}
+getElement('chat-form').addEventListener('submit', event => {
+    event.preventDefault();
+    sendChat();
+});
 function setMultiplayerStatus(message, error = false) {
     const status = getElement('multiplayer-status');
     status.textContent = message;
@@ -1373,6 +1412,7 @@ function connectMultiplayer() {
         }
         if (message.type === 'joined') {
             clearRemotePlayers();
+            clearChat();
             multiplayer.connected = true;
             joined = true;
             multiplayer.room = message.room;
@@ -1391,6 +1431,7 @@ function connectMultiplayer() {
         if (message.type === 'player_joined') setRemotePlayer(message.player);
         if (message.type === 'player_pose') setRemotePlayer(message.player);
         if (message.type === 'player_left' && message.id) removeRemotePlayer(message.id);
+        if (message.type === 'chat') addChatMessage(message.message);
     });
     socket.addEventListener('error', () => {
         if (multiplayer.socket !== socket || joined || rejected) return;
@@ -1401,6 +1442,7 @@ function connectMultiplayer() {
         if (multiplayer.socket !== socket) return;
         multiplayer.connected = false;
         clearRemotePlayers();
+        clearChat();
         getElement('multiplayer-hud').hidden = true;
         updatePlayerCount();
         button.disabled = false;
@@ -1424,6 +1466,7 @@ getElement('leave-multiplayer').addEventListener('click', () => {
     multiplayer.connected = false;
     if (socket) socket.close(1000, 'Player left room');
     clearRemotePlayers();
+    clearChat();
     getElement('multiplayer-hud').hidden = true;
     gameRunning = false;
     for (const key in inputKeys) inputKeys[key] = 0;
@@ -2697,6 +2740,24 @@ function toggleWallGrip() {
 }
 
 addEventListener('keydown', e => {
+    if (!chatPanel.hidden) {
+        if (e.code === 'Escape') {
+            setChatOpen(false);
+            e.preventDefault();
+            return;
+        }
+        if (e.code === 'Enter') {
+            sendChat();
+            e.preventDefault();
+        }
+        // Do not let typing in chat also steer or fire the thrusters.
+        return;
+    }
+    if (e.code === 'Enter' && gameRunning && multiplayer.connected) {
+        setChatOpen(true);
+        e.preventDefault();
+        return;
+    }
     if (e.code === 'Escape') {
         if (!detailsPanel.hidden) {
             setDetailsOpen(false);

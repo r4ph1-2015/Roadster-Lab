@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlsplit
 from js import Date, WebSocketPair
 from workers import DurableObject, Response, WorkerEntrypoint
 
-from room_protocol import MAX_PLAYERS_PER_ROOM, PALETTE, clean_pose, new_player_id, valid_room, valid_username
+from room_protocol import MAX_PLAYERS_PER_ROOM, PALETTE, clean_chat, clean_pose, new_player_id, valid_room, valid_username
 
 
 class Default(WorkerEntrypoint):
@@ -86,6 +86,7 @@ class GameRoom(DurableObject):
             "position": [0.0, 0.0, -30.0],
             "quaternion": [0.0, 0.0, 0.0, 1.0],
             "last_pose_at": 0,
+            "last_chat_at": 0,
         }
         server.serializeAttachment(json.dumps(player, separators=(",", ":")))
         self.ctx.acceptWebSocket(server)
@@ -105,17 +106,26 @@ class GameRoom(DurableObject):
             data = json.loads(message)
         except (TypeError, ValueError):
             return
-        if data.get("type") != "pose":
-            return
         player = self._player_for(websocket)
-        pose = clean_pose(data)
         now = int(Date.now())
-        if not player or not pose or now - player["last_pose_at"] < 45:
+        if not player:
             return
-        player["position"], player["quaternion"] = pose
-        player["last_pose_at"] = now
-        websocket.serializeAttachment(json.dumps(player, separators=(",", ":")))
-        self._broadcast({"type": "player_pose", "player": self._public_player(player)}, exclude_id=player["id"])
+        if data.get("type") == "pose":
+            pose = clean_pose(data)
+            if not pose or now - player["last_pose_at"] < 45:
+                return
+            player["position"], player["quaternion"] = pose
+            player["last_pose_at"] = now
+            websocket.serializeAttachment(json.dumps(player, separators=(",", ":")))
+            self._broadcast({"type": "player_pose", "player": self._public_player(player)}, exclude_id=player["id"])
+            return
+        if data.get("type") == "chat":
+            text = clean_chat(data.get("text"))
+            if not text or now - player.get("last_chat_at", 0) < 500:
+                return
+            player["last_chat_at"] = now
+            websocket.serializeAttachment(json.dumps(player, separators=(",", ":")))
+            self._broadcast({"type": "chat", "message": {"id": player["id"], "username": player["username"], "text": text}})
 
     async def webSocketClose(self, websocket, code, reason, was_clean):
         player = self._player_for(websocket)
