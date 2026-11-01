@@ -2165,9 +2165,9 @@ function updatePhysics(h) {
     q.set(q.x + .5 * h * wq.x, q.y + .5 * h * wq.y, q.z + .5 * h * wq.z, q.w + .5 * h * wq.w).normalize();
     const pv0 = p.clone();
     p.addScaledVector(v, h);
-    // Sweep the centre of mass across the height field after integration. At
-    // extreme speeds a single 120 Hz step can otherwise jump over a ramp or
-    // terrain edge before the point-contact solver has a chance to react.
+    // Sweep only for deep terrain penetration. Normal road contact must still
+    // be handled by the wheel suspension: pinning the centre to ground here
+    // removes tyre load and leaves the car with no drive traction.
     const travel = p.distanceTo(pv0);
     const sweepSteps = Math.min(64, Math.max(1, Math.ceil(travel / .5)));
     for (let i = 1; i <= sweepSteps; i++) {
@@ -2175,9 +2175,9 @@ function updatePhysics(h) {
         const x = pv0.x + (p.x - pv0.x) * fraction;
         const y = pv0.y + (p.y - pv0.y) * fraction;
         const z = pv0.z + (p.z - pv0.z) * fraction;
-        const ground = getSurfaceHeight(x, z) + .55;
-        if (y >= ground) continue;
-        p.set(x, ground, z);
+        const ground = getSurfaceHeight(x, z);
+        if (y >= ground - .8) continue;
+        p.set(x, ground + .6, z);
         if (v.y < 0) v.y = 0;
         break;
     }
