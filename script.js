@@ -1697,29 +1697,33 @@ const pilot = {
     mode: 0, maintainAltitude: true, target: 10000000, singleTrick: false,
     input: { thr: 0, str: 0, yaw: 0, rocket: 0, lift: 0 },
     plan: 0, planTime: 0, landingScore: 0, trials: new Map(), bestPlan: 0, report: 'Learning from real scored maneuvers.', landingBuffer: 0,
-    zeroMode: 'manual', phase: 'observing', sampleT: 0, attemptStartScore: 0, predictedScore: 0, landingStatus: 'Waiting', recommendation: ''
+    zeroMode: 'manual', phase: 'observing', sampleT: 0, decisionT: 0, strategyAge: 0, attemptStartScore: 0,
+    predictedScore: 0, landingStatus: 'Waiting', recommendation: '', objective: 'Observe and learn',
+    maneuver: 'None', risk: 0, confidence: 0, lastConfigAt: -Infinity, lastConfigKey: '', state: null
 };
 const PILOT_NAMES = ['MANUAL', 'STANDARD', 'TRICK', 'ROADSTER ZERO'];
 const ZERO_STORAGE_KEY = 'rtl_zero_training_v2';
 const ZERO_STRATEGIES = [
-    { name: 'Pitch chain', controls: [1, 0, 0], power: 1.7, speed: 1050, stability: .7 },
-    { name: 'Reverse pitch', controls: [-1, 0, 0], power: 1.8, speed: 1100, stability: .75 },
-    { name: 'Roll chain', controls: [0, 1, 0], power: 1.55, speed: 950, stability: .85 },
-    { name: 'Counter roll', controls: [0, -1, 0], power: 1.55, speed: 950, stability: .85 },
-    { name: 'Corkscrew', controls: [1, 1, .5], power: 2.1, speed: 1300, stability: .65 },
-    { name: 'Recovery spiral', controls: [-1, -1, -.5], power: 1.9, speed: 1150, stability: .9 }
+    { name: 'Pitch chain', controls: [1, 0, 0], turns: [1.25, 0, 0], power: 1.7, speed: 1050, stability: .78, minAltitude: 26, minSpeed: 14, maxRisk: .58, intent: 'flip sequence' },
+    { name: 'Reverse pitch', controls: [-1, 0, 0], turns: [1.25, 0, 0], power: 1.75, speed: 1080, stability: .8, minAltitude: 28, minSpeed: 16, maxRisk: .56, intent: 'reverse flip' },
+    { name: 'Roll chain', controls: [0, 1, 0], turns: [0, 1.5, 0], power: 1.55, speed: 930, stability: .9, minAltitude: 22, minSpeed: 12, maxRisk: .64, intent: 'barrel-roll chain' },
+    { name: 'Counter roll', controls: [0, -1, 0], turns: [0, 1.5, 0], power: 1.55, speed: 930, stability: .9, minAltitude: 22, minSpeed: 12, maxRisk: .64, intent: 'counter-roll chain' },
+    { name: 'Corkscrew', controls: [1, 1, .5], turns: [1, 1, .75], power: 1.95, speed: 1220, stability: .72, minAltitude: 42, minSpeed: 20, maxRisk: .48, intent: 'mixed corkscrew' },
+    { name: 'Recovery spiral', controls: [-1, -1, -.5], turns: [.75, .75, .5], power: 1.5, speed: 860, stability: 1.05, minAltitude: 18, minSpeed: 8, maxRisk: .76, intent: 'low-risk recovery' }
 ];
 function loadZeroTraining() {
     try {
         const saved = JSON.parse(localStorage.getItem(ZERO_STORAGE_KEY));
-        if (saved && saved.version === 2 && saved.strategies) return saved;
+        if (saved && saved.strategies) return { ...saved, version: 3, human: saved.human || { samples: 0, settings: null, bestGain: 0 } };
     } catch { }
-    return { version: 2, observations: 0, attempts: 0, successfulLandings: 0, bestGain: 0, totalGain: 0, lastScore: 0, strategies: {}, recent: [] };
+    return { version: 3, observations: 0, attempts: 0, successfulLandings: 0, bestGain: 0, totalGain: 0, lastScore: 0, strategies: {}, recent: [], human: { samples: 0, settings: null, bestGain: 0 } };
 }
 const zeroTraining = loadZeroTraining();
 let zeroRunSamples = [], zeroRunActive = false;
 function zeroStrategy(key) {
-    return zeroTraining.strategies[key] || (zeroTraining.strategies[key] = { runs: 0, successes: 0, totalGain: 0, bestGain: 0, humanRuns: 0, settings: null, samples: 0 });
+    const entry = zeroTraining.strategies[key] || (zeroTraining.strategies[key] = { runs: 0, successes: 0, totalGain: 0, bestGain: 0, humanRuns: 0, settings: null, samples: 0, totalRisk: 0, failures: 0 });
+    entry.totalRisk ||= 0; entry.failures ||= 0;
+    return entry;
 }
 function saveZeroTraining() {
     try { localStorage.setItem(ZERO_STORAGE_KEY, JSON.stringify(zeroTraining)); } catch { }
@@ -1746,40 +1750,116 @@ function observeZero(h) {
     if (zeroTraining.observations % 25 === 0) saveZeroTraining();
 }
 function zeroMean(i) { const x = zeroStrategy(String(i)); return x.runs ? x.totalGain / x.runs : 0; }
-function chooseZeroStrategy() {
+function zeroEvaluateState() {
+    const s = vehicleState, ground = getSurfaceHeight(s.p.x, s.p.z), altitude = Math.max(0, s.p.y - ground - .5);
+    const up = createVector(0, 1, 0).applyQuaternion(s.q), forward = createVector(0, 0, 1).applyQuaternion(s.q);
+    const localW = s.w.clone().applyQuaternion(s.q.clone().invert()), speed = s.v.length(), angular = s.w.length();
+    let terrainRise = 0;
+    for (const distance of [6, 15, 30]) terrainRise = Math.max(terrainRise, getSurfaceHeight(s.p.x + forward.x * distance, s.p.z + forward.z * distance) - ground);
+    const orientationRisk = clamp((.72 - up.y) / 1.72, 0, 1);
+    const descentRisk = s.v.y < 0 ? clamp((-s.v.y - 9) / 30, 0, 1) : 0;
+    const angularRisk = clamp((angular - 4.5) / 12, 0, 1);
+    const terrainRisk = altitude < 24 ? clamp((terrainRise - altitude * .18) / 8, 0, 1) : 0;
+    const risk = clamp(orientationRisk * .38 + descentRisk * .24 + angularRisk * .24 + terrainRisk * .14 + (altitude < 8 ? .18 : 0), 0, 1);
+    return { altitude, ground, up, forward, localW, speed, acceleration: s.g.length() * 9.81, angular, terrainRise, risk, descent: s.v.y, air: s.nc < 3, rotations: [s.rotPitch, s.rotRoll, s.rotYaw], combo: G.combo, multiplier: G.mult };
+}
+function zeroProjectedScore(state) {
+    const [pitch, roll, yaw] = state.rotations;
+    const flips = Math.floor(Math.abs(pitch) / (PI * 2) + .18), rolls = Math.floor(Math.abs(roll) / (PI * 2) + .18), spins = Math.floor(Math.abs(yaw) / (PI * 2) + .18);
+    const airBase = Math.max(0, vehicleState.air * 60 + vehicleState.maxH * 8 + Math.hypot(vehicleState.p.x - vehicleState.t0.x, vehicleState.p.z - vehicleState.t0.z) * 3);
+    return (airBase + 600 * flips * flips + 500 * rolls * rolls + 400 * spins * spins + (state.risk < .22 ? 150 : 0)) * Math.max(1, state.multiplier);
+}
+function zeroLandingEstimate(state) {
+    const upright = clamp((state.up.y + 1) * .5, 0, 1);
+    const stable = upright * clamp(1 - state.angular / 14, 0, 1);
+    const descent = state.descent < 0 ? clamp(1 - Math.abs(state.descent) / 32, 0, 1) : .72;
+    const chance = clamp(.08 + stable * .62 + descent * .2 + (state.altitude < 65 ? .1 : 0) - state.terrainRise * .012, .02, .98);
+    const projected = zeroProjectedScore(state);
+    return { chance, projected, expected: projected * chance, altitude: state.altitude };
+}
+function chooseZeroStrategy(state) {
     const total = Math.max(1, zeroTraining.attempts);
-    let best = 0, score = -Infinity;
-    ZERO_STRATEGIES.forEach((_, i) => {
-        const x = zeroStrategy(String(i)), exploration = Math.sqrt(Math.log(total + 2) / (x.runs + 1));
-        const value = zeroMean(i) + exploration * Math.max(250, zeroTraining.bestGain * .12 + 80) - (x.runs > 2 && x.successes / x.runs < .25 ? 180 : 0);
-        if (value > score) { score = value; best = i; }
+    let best = ZERO_STRATEGIES.length - 1, bestValue = -Infinity;
+    ZERO_STRATEGIES.forEach((strategy, i) => {
+        const entry = zeroStrategy(String(i)), runs = entry.runs || 0, success = runs ? entry.successes / runs : .55;
+        const mean = runs ? entry.totalGain / runs : Math.max(180, zeroTraining.bestGain * .18);
+        const exploration = Math.sqrt(Math.log(total + 2) / (runs + 1)) * Math.max(180, zeroTraining.bestGain * .1 + 70);
+        const capability = (state.air ? (state.altitude >= strategy.minAltitude && state.speed >= strategy.minSpeed ? 1 : .32) : 1) * (state.risk <= strategy.maxRisk ? 1 : .18);
+        const repeatPenalty = pilot.plan === i && pilot.strategyAge < 1.2 ? 180 : 0;
+        const riskCost = (entry.totalRisk / Math.max(1, runs)) * 220 + Math.max(0, state.risk - strategy.maxRisk) * 900;
+        const humanBoost = zeroTraining.human?.settings && runs < 2 ? 70 : 0;
+        const value = (mean * (.35 + success * .65) + exploration + humanBoost - riskCost - repeatPenalty) * capability;
+        if (value > bestValue) { bestValue = value; best = i; }
     });
+    pilot.confidence = clamp(bestValue / Math.max(250, zeroTraining.bestGain || 500), 0, 1);
     return best;
 }
-function applyZeroConfiguration(strategy) {
-    // All values are clamped to the public tuning controls' safe ranges.
-    tuning.power = clamp(strategy.power, .5, 100);
-    tuning.maxSpeed = clamp(strategy.speed / 3.6, 500 / 3.6, 6000 / 3.6);
-    tuning.stability = clamp(strategy.stability, 0, 2);
+function applyZeroConfiguration(strategy, state, purpose = 'trick') {
+    const riskScale = purpose === 'landing' ? .72 : clamp(1.08 - state.risk * .32, .72, 1.08);
+    const key = `${strategy.name}:${purpose}:${Math.round(riskScale * 10)}`;
+    if (pilot.lastConfigKey === key && pilot.strategyAge < 1) return;
+    pilot.lastConfigKey = key;
+    const human = zeroTraining.human;
+    const humanWeight = purpose === 'trick' && human?.settings && human.bestGain > 0 ? clamp(human.bestGain / Math.max(1, zeroTraining.bestGain) * .2, .06, .2) : 0;
+    const plannedPower = strategy.power * riskScale, plannedSpeed = strategy.speed * (purpose === 'landing' ? .78 : riskScale);
+    tuning.power = clamp(plannedPower * (1 - humanWeight) + (human?.settings?.power || plannedPower) * humanWeight, .5, 100);
+    tuning.maxSpeed = clamp((plannedSpeed * (1 - humanWeight) + (human?.settings?.maxSpeed || plannedSpeed) * humanWeight) / 3.6, 500 / 3.6, 6000 / 3.6);
+    tuning.stability = clamp(strategy.stability + (purpose === 'landing' ? .45 : state.risk * .25), 0, 2);
     tuning.steering = clamp(1 + Math.abs(strategy.controls[1]) * .2, .25, 4);
-    tuning.grip = 1;
+    tuning.grip = purpose === 'landing' ? 1.3 : 1;
     stabilityMode = true; wallGripEnabled = true;
+    pilot.lastConfigAt = performance.now();
     const ui = [['speed', tuning.maxSpeed * 3.6, v => Math.round(v) + ' km/h'], ['power', tuning.power, v => v.toFixed(1) + '×'], ['steering', tuning.steering, v => v.toFixed(2) + '×'], ['stability', tuning.stability, v => v.toFixed(2) + '×'], ['grip', tuning.grip, v => v.toFixed(1) + '×']];
     ui.forEach(([name, value, label]) => { const control = getElement('tune-' + name), output = getElement('tune-' + name + '-out'); if (control) control.value = String(value); if (output) output.textContent = label(value); });
 }
-function zeroLandingEstimate(altitude) {
-    const s = vehicleState, up = createVector(0, 1, 0).applyQuaternion(s.q);
-    const stable = clamp((up.y + 1) * .5, 0, 1) * clamp(1 - s.w.length() / 14, 0, 1);
-    const descent = s.v.y < 0 ? clamp(1 - Math.abs(s.v.y) / 32, 0, 1) : .7;
-    const chance = clamp(.12 + stable * .62 + descent * .2 + (altitude < 65 ? .1 : 0), .02, .98);
-    const trickPotential = Math.max(0, vehicleState.air * 55 + (Math.abs(vehicleState.rotPitch) + Math.abs(vehicleState.rotRoll) + Math.abs(vehicleState.rotYaw)) * 90) * G.mult;
-    return { chance, expected: trickPotential * chance, altitude };
+function zeroSetStrategy(index, state, reason) {
+    pilot.plan = index; pilot.planTime = 0; pilot.strategyAge = 0; pilot.maneuver = ZERO_STRATEGIES[index].name;
+    pilot.recommendation = reason; applyZeroConfiguration(ZERO_STRATEGIES[index], state);
+}
+function zeroDecisionTick(h, state) {
+    pilot.decisionT += h;
+    if (pilot.decisionT < .2) return;
+    pilot.decisionT = 0; pilot.state = state; pilot.risk = state.risk;
+    const estimate = zeroLandingEstimate(state); pilot.predictedScore = G.score + estimate.expected;
+    if (!state.air) {
+        zeroSetStrategy(chooseZeroStrategy(state), state, 'best learned launch profile');
+        pilot.attemptStartScore = G.score; pilot.phase = 'launching'; pilot.objective = 'build safe launch speed'; pilot.landingStatus = 'grounded · evaluating next attempt';
+        return;
+    }
+    pilot.strategyAge += .2;
+    const targetReached = pilot.predictedScore >= pilot.target + pilot.landingBuffer;
+    const unsafe = state.risk > .68 || (state.altitude < 18 && state.descent < -5) || (state.altitude < 10 && state.up.y < .45);
+    const diminishingReturns = estimate.projected - (G.score - pilot.attemptStartScore) < 180 && pilot.strategyAge > 2.6;
+    if (!pilot.singleTrick && (unsafe || targetReached || diminishingReturns || pilot.strategyAge > 6.2)) {
+        pilot.phase = unsafe ? 'recovering' : 'preparing landing';
+        pilot.objective = unsafe ? 'protect current combo' : 'convert predicted score into a clean landing';
+        pilot.landingStatus = `${Math.round(estimate.chance * 100)}% landing confidence · ${unsafe ? 'risk elevated' : 'landing window selected'}`;
+        applyZeroConfiguration(ZERO_STRATEGIES[pilot.plan], state, 'landing');
+        return;
+    }
+    const strategy = ZERO_STRATEGIES[pilot.plan];
+    const completed = strategy.turns.every((turns, axis) => !turns || Math.abs(state.rotations[axis]) >= turns * PI * 2 - .35);
+    if (completed && state.altitude > 30 && state.risk < .42 && pilot.strategyAge > 1.1) zeroSetStrategy(chooseZeroStrategy(state), state, 'sequence complete; optimizing next maneuver');
+    pilot.phase = 'executing'; pilot.objective = ZERO_STRATEGIES[pilot.plan].intent; pilot.landingStatus = `${Math.round(estimate.chance * 100)}% landing confidence · score potential ${fmt(estimate.projected)}`;
+}
+function zeroAxisControl(rotation, angularVelocity, direction, turns, strength = .9) {
+    if (!direction) return clamp(-angularVelocity * .28);
+    const remaining = turns * PI * 2 - Math.abs(rotation);
+    if (remaining > .48) return direction * strength;
+    return clamp(-angularVelocity * .48 - direction * remaining * .55);
+}
+function zeroRecoveryControls(state, a) {
+    a.thr = clamp(-state.up.z * 3.4 - state.localW.x * .52);
+    a.str = clamp(state.up.x * 3.7 - state.localW.z * .58);
+    a.yaw = clamp(-state.localW.y * .4);
+    a.rocket = state.altitude > 35 && state.speed < 34 ? .2 : 0;
+    a.lift = clamp(.58 + Math.max(0, -state.descent) * .04 + (22 - state.altitude) * .018, .35, 1);
 }
 const manualInputActive = driveInputActive;
 function selectPilot(mode, message = true) {
     pilot.mode = mode;
     pilot.input = { thr: 0, str: 0, yaw: 0, rocket: 0, lift: 0 };
-    if (mode === 3) { pilot.phase = pilot.zeroMode === 'autonomous' ? 'ready to train autonomously' : 'observing player maneuvers'; pilot.attemptStartScore = G.score; }
+    if (mode === 3) { pilot.phase = pilot.zeroMode === 'autonomous' ? 'analyzing launch state' : 'observing player maneuvers'; pilot.objective = pilot.zeroMode === 'autonomous' ? 'select a learned maneuver' : 'learn from player control'; pilot.attemptStartScore = G.score; }
     if (message) showToast('PILOT · ' + PILOT_NAMES[mode]);
     document.querySelectorAll('[data-pilot]').forEach(b => b.classList.toggle('active', +b.dataset.pilot === mode));
     const zeroControls = getElement('zero-mode-controls'); if (zeroControls) zeroControls.hidden = mode !== 3;
@@ -1790,8 +1870,9 @@ function updateAutopilot(h) {
     if (manualInputActive()) { if (pilot.mode === 3) { pilot.zeroMode = 'manual'; pilot.phase = 'manual override'; } return; }
     if (!pilot.mode || (pilot.mode === 3 && pilot.zeroMode !== 'autonomous')) return;
     const s = vehicleState, altitude = s.p.y - getSurfaceHeight(s.p.x, s.p.z), air = s.nc < 3;
+    const zeroState = pilot.mode === 3 ? zeroEvaluateState() : null;
+    if (zeroState) zeroDecisionTick(h, zeroState);
     if (!air) {
-        if (pilot.mode === 3) { pilot.plan = chooseZeroStrategy(); pilot.planTime = 0; pilot.attemptStartScore = G.score; pilot.phase = 'launching ' + ZERO_STRATEGIES[pilot.plan].name; applyZeroConfiguration(ZERO_STRATEGIES[pilot.plan]); }
         a.thr = .75; return;
     }
     const up = createVector(0, 1, 0).applyQuaternion(s.q), localW = s.w.clone().applyQuaternion(s.q.clone().invert());
@@ -1801,18 +1882,22 @@ function updateAutopilot(h) {
         if (pilot.maintainAltitude) a.lift = clamp(.54 + (18 - altitude) * .025 - s.v.y * .035, 0, 1);
         a.yaw = clamp(-localW.y * .25);
     } else {
-        const patterns = ZERO_STRATEGIES.map(x => x.controls);
-        if (pilot.mode === 3 && pilot.planTime === 0) { pilot.plan = chooseZeroStrategy(); applyZeroConfiguration(ZERO_STRATEGIES[pilot.plan]); pilot.attemptStartScore = G.score; }
-        const plan = patterns[pilot.plan % patterns.length]; pilot.planTime += h;
-        a.thr = .45; a.rocket = .72; a.lift = altitude < 28 ? .8 : .18;
-        a.thr += plan[0] * .25; a.str = plan[1] * .95; a.yaw = plan[2];
+        const strategy = ZERO_STRATEGIES[pilot.plan]; pilot.planTime += h;
         if (pilot.mode === 3) {
-            const estimate = zeroLandingEstimate(altitude); pilot.predictedScore = G.score + estimate.expected;
-            const shouldLand = !pilot.singleTrick && (pilot.predictedScore >= pilot.target + pilot.landingBuffer || (estimate.chance < .32 && altitude < 80) || pilot.planTime > 5.4);
-            if (shouldLand) { pilot.phase = 'preparing landing'; pilot.landingStatus = `${Math.round(estimate.chance * 100)}% safe · expected ${fmt(pilot.predictedScore)}`; a.str = -levelRoll; a.thr = levelPitch; a.lift = clamp(.7 + Math.max(0, -s.v.y) * .035, .35, 1); a.rocket = 0; }
-            else pilot.phase = 'executing ' + ZERO_STRATEGIES[pilot.plan].name;
+            if (pilot.phase === 'recovering' || pilot.phase === 'preparing landing') zeroRecoveryControls(zeroState, a);
+            else {
+                a.thr = zeroAxisControl(s.rotPitch, zeroState.localW.x, strategy.controls[0], strategy.turns[0], .78);
+                a.str = zeroAxisControl(s.rotRoll, zeroState.localW.z, strategy.controls[1], strategy.turns[1], .95);
+                a.yaw = zeroAxisControl(s.rotYaw, zeroState.localW.y, strategy.controls[2], strategy.turns[2], .66);
+                a.rocket = zeroState.altitude < 62 && zeroState.speed < tuning.maxSpeed * .52 ? .78 : .22;
+                a.lift = clamp(.34 + (28 - zeroState.altitude) * .018 - zeroState.descent * .024, .12, .9);
+            }
+        } else {
+            const plan = strategy.controls;
+            a.thr = .45 + plan[0] * .25; a.rocket = .72; a.lift = altitude < 28 ? .8 : .18;
+            a.str = plan[1] * .95; a.yaw = plan[2];
         }
-        if (pilot.mode === 2 && pilot.planTime > 2.6) { pilot.plan = (pilot.plan + 1) % patterns.length; pilot.planTime = 0; }
+        if (pilot.mode === 2 && pilot.planTime > 2.6) { pilot.plan = (pilot.plan + 1) % ZERO_STRATEGIES.length; pilot.planTime = 0; }
         // Recovery still uses the real landing scorer; ZERO simply avoids wasting a failed run.
         if (altitude < 7 && s.v.y < -6 && !pilot.singleTrick) { a.str = -levelRoll; a.thr = levelPitch; a.lift = 1; a.rocket = 0; }
     }
@@ -1823,10 +1908,10 @@ function recordZeroResult(beforeScore, landingImpact) {
     const humanPlan = [Math.abs(vehicleState.rotPitch), Math.abs(vehicleState.rotRoll), Math.abs(vehicleState.rotYaw)].indexOf(Math.max(Math.abs(vehicleState.rotPitch), Math.abs(vehicleState.rotRoll), Math.abs(vehicleState.rotYaw)));
     const key = zeroActive ? String(pilot.plan) : String(humanPlan === 0 ? (vehicleState.rotPitch < 0 ? 1 : 0) : humanPlan === 1 ? (vehicleState.rotRoll < 0 ? 3 : 2) : 4);
     const clean = createVector(0, 1, 0).applyQuaternion(vehicleState.q).y > .3 && landingImpact < 14;
-    const entry = zeroStrategy(key); entry.runs++; entry.totalGain += gain; entry.bestGain = Math.max(entry.bestGain, gain); if (clean) entry.successes++; if (!zeroActive) entry.humanRuns++; entry.settings = zeroSnapshot(zeroActive ? 'zero' : 'player').tuning;
+    const entry = zeroStrategy(key); entry.runs++; entry.totalGain += gain; entry.bestGain = Math.max(entry.bestGain, gain); entry.totalRisk += pilot.risk || 0; if (clean) entry.successes++; else entry.failures++; if (!zeroActive) { entry.humanRuns++; zeroTraining.human.samples++; zeroTraining.human.settings = zeroSnapshot('player').tuning; zeroTraining.human.bestGain = Math.max(zeroTraining.human.bestGain || 0, gain); } entry.settings = zeroSnapshot(zeroActive ? 'zero' : 'player').tuning;
     zeroTraining.attempts++; zeroTraining.totalGain += gain; zeroTraining.bestGain = Math.max(zeroTraining.bestGain, gain); if (clean) zeroTraining.successfulLandings++; zeroTraining.lastScore = G.score;
     zeroTraining.recent.unshift({ source: zeroActive ? 'ZERO' : 'PLAYER', strategy: ZERO_STRATEGIES[+key].name, gain, clean, score: G.score, at: Date.now(), sequence: zeroRunSamples }); zeroTraining.recent.length = Math.min(20, zeroTraining.recent.length); zeroRunActive = false;
-    if (zeroActive) { pilot.planTime = 0; pilot.phase = clean ? 'landing complete' : 'recovering from failed landing'; pilot.landingStatus = clean ? 'safe landing confirmed' : 'crash / unstable landing logged'; pilot.report = `Actual ${clean ? 'safe' : 'failed'} landing +${fmt(gain)} · ${ZERO_STRATEGIES[pilot.plan].name} avg ${fmt(entry.totalGain / entry.runs)}`; }
+    if (zeroActive) { pilot.planTime = 0; pilot.strategyAge = 0; pilot.phase = clean ? 'landing complete' : 'recovering from failed landing'; pilot.objective = clean ? 'analyze score and select next maneuver' : 'record risk and revise strategy'; pilot.landingStatus = clean ? 'safe landing confirmed' : 'crash / unstable landing logged'; pilot.report = `Actual ${clean ? 'safe' : 'failed'} landing +${fmt(gain)} · ${ZERO_STRATEGIES[pilot.plan].name} avg ${fmt(entry.totalGain / entry.runs)}`; }
     saveZeroTraining();
 }
 const inputKeys = {}, KM = {
@@ -3564,7 +3649,9 @@ function renderFrame(dt) {
     const zeroBest = Object.entries(zeroTraining.strategies).filter(([key]) => key !== 'human').sort((a, b) => (b[1].runs ? b[1].totalGain / b[1].runs : 0) - (a[1].runs ? a[1].totalGain / a[1].runs : 0))[0];
     const landingRate = zeroTraining.attempts ? Math.round(zeroTraining.successfulLandings / zeroTraining.attempts * 100) : 0;
     getElement('zero-state').textContent = `Mode: ${pilot.zeroMode === 'autonomous' ? 'AUTONOMOUS' : 'LEARN / RECOMMEND'} · ${pilot.phase}`;
-    getElement('zero-prediction').textContent = `Current ${fmt(G.score)} · predicted ${pilot.predictedScore ? fmt(pilot.predictedScore) : '—'} · landing ${pilot.landingStatus}`;
+    getElement('zero-objective').textContent = `Objective: ${pilot.objective} · maneuver ${pilot.maneuver} · risk ${Math.round(pilot.risk * 100)}% · combo x${G.mult}`;
+    getElement('zero-prediction').textContent = `Current ${fmt(G.score)} · predicted ${pilot.predictedScore ? fmt(pilot.predictedScore) : '—'} · target ${fmt(pilot.target)} · ${pilot.landingStatus}`;
+    getElement('zero-controls').textContent = `Thrust ${tuning.power.toFixed(1)}× · speed cap ${Math.round(tuning.maxSpeed * 3.6)} km/h · confidence ${Math.round(pilot.confidence * 100)}%`;
     getElement('zero-performance').textContent = `Attempts ${zeroTraining.attempts} · avg ${fmt(zeroTraining.attempts ? zeroTraining.totalGain / zeroTraining.attempts : 0)} · best ${fmt(zeroTraining.bestGain)} · safe landings ${landingRate}%`;
     const selected = ZERO_STRATEGIES[pilot.plan];
     const learned = zeroBest ? `${ZERO_STRATEGIES[+zeroBest[0]]?.name || 'Archived strategy'} avg ${fmt(zeroBest[1].totalGain / Math.max(1, zeroBest[1].runs))} (${zeroBest[1].successes}/${zeroBest[1].runs} safe)` : 'collecting scored runs';
