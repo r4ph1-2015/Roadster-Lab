@@ -1817,6 +1817,9 @@ const WHEEL_DEAD_ZONE = .045;
 // The G923 Gamepad axis increases when the wheel turns right; game steering
 // uses the opposite sign (positive means left), so invert the hardware axis.
 const WHEEL_STEERING_SIGN = -1;
+// Wheels need more travel than keys, so give full-lock input a little extra
+// authority without making the keyboard controls twitchy.
+const WHEEL_STEERING_BOOST = 1.5;
 function resetWheelInput() {
     Object.assign(wheelInput, { connected: false, index: -1, id: '', pedalRest: [], steer: 0, throttle: 0, brake: 0, yaw: 0, rocket: 0, lift: 0, side: 0, grip: 0, previousButtons: [] });
 }
@@ -1874,7 +1877,7 @@ function updateWheelInput() {
     wheelInput.previousButtons = pressed;
 }
 function driveThrottle() { return Math.max(inputKeys.W | 0, wheelInput.throttle) - Math.max(inputKeys.S | 0, wheelInput.brake); }
-function driveSteer() { return (inputKeys.A | 0) - (inputKeys.D | 0) + wheelInput.steer; }
+function driveSteer() { return (inputKeys.A | 0) - (inputKeys.D | 0) + wheelInput.steer * WHEEL_STEERING_BOOST; }
 function driveYaw() { return (inputKeys.Q | 0) - (inputKeys.E | 0) + wheelInput.yaw; }
 function driveSide() { return (inputKeys.Z | 0) - (inputKeys.C | 0) + wheelInput.side; }
 function driveInputActive() {
@@ -2023,9 +2026,9 @@ function updatePhysics(h) {
     // Keep this to ground driving; it should not alter wall riding or airborne control.
     const driftRequested = !!(inputKeys.S || wheelInput.brake > .02 || pilot.input.brake) && Math.abs(str) > 0 && spd > 7.5 && vehicleState.nc >= 3 && vehicleState.steep > 0.55;
     vehicleState.drifting = driftRequested;
-    const steerAuthority = (driftRequested ? 0.72 : 0.5) * tuning.steering;
-    const steerSpeedScale = driftRequested ? 20 : 14;
-    vehicleState.steer += (str * steerAuthority / (1 + spd / steerSpeedScale) - vehicleState.steer) * Math.min(1, h * 8);
+    const steerAuthority = (driftRequested ? 0.9 : 0.72) * tuning.steering;
+    const steerSpeedScale = driftRequested ? 32 : 26;
+    vehicleState.steer += (str * steerAuthority / (1 + spd / steerSpeedScale) - vehicleState.steer) * Math.min(1, h * 12);
     const gripRequested = wallGripEnabled && (inputKeys.Shift || wheelInput.grip || (vehicleState.auto && vehicleState.steep < 0.9));
     // Release grip faster than it engages, so the car can cleanly leave a wall ride.
     const gripResponse = gripRequested ? 6 : 12;
